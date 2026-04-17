@@ -4,6 +4,8 @@ use minifb::{Key, KeyRepeat, Window, WindowOptions};
 
 use magnonic_clock_sim::config::SimConfig;
 use magnonic_clock_sim::gpu::GpuSolver;
+use magnonic_clock_sim::material::BulkMaterial;
+use magnonic_clock_sim::substrate::Substrate;
 
 const PLOT_HEIGHT: usize = 200;
 const LABEL_HEIGHT: usize = 14;
@@ -16,9 +18,32 @@ fn main() {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--nx" => { config.nx = args[i + 1].parse().unwrap(); i += 2; }
-            "--ny" => { config.ny = args[i + 1].parse().unwrap(); i += 2; }
-            "--alpha" => { config.material.alpha = args[i + 1].parse().unwrap(); i += 2; }
+            "--nx" => { config.geometry.nx = args[i + 1].parse().unwrap(); i += 2; }
+            "--ny" => { config.geometry.ny = args[i + 1].parse().unwrap(); i += 2; }
+            "--thickness" => {
+                let nm: f64 = args[i + 1].parse().unwrap();
+                config.geometry.thickness = nm * 1e-9;
+                i += 2;
+            }
+            "--material" => {
+                if let Some(m) = BulkMaterial::lookup(&args[i + 1]) {
+                    config.bulk = m;
+                } else {
+                    eprintln!("Unknown material: {}", args[i + 1]);
+                    std::process::exit(1);
+                }
+                i += 2;
+            }
+            "--substrate" => {
+                if let Some(s) = Substrate::lookup(&args[i + 1]) {
+                    config.substrate = s;
+                } else {
+                    eprintln!("Unknown substrate: {}", args[i + 1]);
+                    std::process::exit(1);
+                }
+                i += 2;
+            }
+            "--alpha" => { config.bulk.alpha_bulk = args[i + 1].parse().unwrap(); i += 2; }
             "--bz" => { config.b_ext[2] = args[i + 1].parse().unwrap(); i += 2; }
             "--dt" => { config.dt = args[i + 1].parse().unwrap(); i += 2; }
             _ => { i += 1; }
@@ -26,8 +51,8 @@ fn main() {
     }
     config.print_summary();
 
-    let nx = config.nx as usize;
-    let ny = config.ny as usize;
+    let nx = config.geometry.nx as usize;
+    let ny = config.geometry.ny as usize;
     let win_w = nx.max(512);
     let win_h = ny + PLOT_HEIGHT + LABEL_HEIGHT;
 
@@ -51,7 +76,7 @@ fn main() {
     let mut steps_per_frame: usize = 100;
 
     // Live parameters
-    let mut alpha = config.material.alpha as f32;
+    let mut alpha = config.effective().alpha as f32;
     let mut b_ext_x = 0.0f32;
     let mut b_ext_z = config.b_ext[2] as f32;
 

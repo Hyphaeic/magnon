@@ -37,22 +37,37 @@ struct GpuParams {
 
 impl GpuParams {
     fn from_config(cfg: &SimConfig) -> Self {
+        let eff = cfg.effective();
+
+        // Enforce unit anisotropy axis — the shader applies it directly
+        // as û in (m·û)û without normalizing. A non-unit axis would
+        // silently rescale the anisotropy strength.
+        let [ux, uy, uz] = cfg.u_axis;
+        let u_norm = (ux * ux + uy * uy + uz * uz).sqrt();
+        let (u_axis_x, u_axis_y, u_axis_z) = if u_norm > 1e-12 {
+            (ux / u_norm, uy / u_norm, uz / u_norm)
+        } else {
+            // Degenerate axis — no anisotropy direction defined.
+            // Fall back to +z (canonical PMA easy axis).
+            (0.0, 0.0, 1.0)
+        };
+
         Self {
-            nx: cfg.nx,
-            ny: cfg.ny,
-            cell_count: cfg.nx * cfg.ny,
+            nx: cfg.geometry.nx,
+            ny: cfg.geometry.ny,
+            cell_count: cfg.geometry.nx * cfg.geometry.ny,
             _pad_grid: 0,
             dt: cfg.dt as f32,
-            gamma: cfg.material.gamma as f32,
-            alpha: cfg.material.alpha as f32,
+            gamma: eff.gamma as f32,
+            alpha: eff.alpha as f32,
             stab_coeff: cfg.stab_coeff as f32,
-            exchange_pf: cfg.exchange_prefactor() as f32,
-            anisotropy_pf: cfg.anisotropy_prefactor() as f32,
+            exchange_pf: eff.exchange_prefactor(cfg.geometry.cell_size) as f32,
+            anisotropy_pf: eff.anisotropy_prefactor() as f32,
             _pad_mat0: 0.0,
             _pad_mat1: 0.0,
-            u_axis_x: cfg.u_axis[0] as f32,
-            u_axis_y: cfg.u_axis[1] as f32,
-            u_axis_z: cfg.u_axis[2] as f32,
+            u_axis_x: u_axis_x as f32,
+            u_axis_y: u_axis_y as f32,
+            u_axis_z: u_axis_z as f32,
             _pad_axis: 0.0,
             b_ext_x: cfg.b_ext[0] as f32,
             b_ext_y: cfg.b_ext[1] as f32,
@@ -147,7 +162,7 @@ impl GpuSolver {
         queue: Arc<wgpu::Queue>,
         config: &SimConfig,
     ) -> Result<Self, String> {
-        let cell_count = config.nx * config.ny;
+        let cell_count = config.geometry.nx * config.geometry.ny;
         let buf_bytes = (cell_count as u64) * 4 * 4; // 4 f32 per cell
 
         // ── Initial magnetization ──────────────────────────────
@@ -289,7 +304,7 @@ impl GpuSolver {
     /// Initialize magnetization: uniform +z with small random perturbation.
     fn init_magnetization(config: &SimConfig) -> Vec<f32> {
         use rand::Rng;
-        let n = (config.nx * config.ny) as usize;
+        let n = (config.geometry.nx * config.geometry.ny) as usize;
         let mut data = vec![0.0f32; n * 4];
         let mut rng = rand::thread_rng();
 
@@ -466,14 +481,25 @@ impl GpuSolver {
     }
 
     /// Re-upload magnetization: stripe domains (alternating +z / -z).
+    /// Adds a small transverse perturbation (~5° cone) so domain walls can
+    /// evolve. Without it, adjacent +z/-z cells are collinear, `m × B_exch`
+    /// vanishes, and the sharp walls are frozen in a metastable state.
     pub fn reset_stripe_domains(&mut self, stripe_width: u32) {
+        use rand::Rng;
         let n = self.cell_count as usize;
-        let ny = self.config.ny;
+        let ny = self.config.geometry.ny;
         let mut data = vec![0.0f32; n * 4];
+        let mut rng = rand::thread_rng();
         for i in 0..n {
             let ix = (i as u32) / ny;
-            let mz: f32 = if (ix / stripe_width) % 2 == 0 { 1.0 } else { -1.0 };
-            data[i * 4 + 2] = mz;
+            let mz_sign: f32 = if (ix / stripe_width) % 2 == 0 { 1.0 } else { -1.0 };
+            // Small transverse tilt breaks collinear symmetry at walls
+            let theta: f32 = rng.gen_range(0.0..0.087);
+            let phi: f32 = rng.gen_range(0.0..std::f32::consts::TAU);
+            let st = theta.sin();
+            data[i * 4] = st * phi.cos();
+            data[i * 4 + 1] = st * phi.sin();
+            data[i * 4 + 2] = mz_sign * theta.cos();
         }
         self.queue.write_buffer(&self.mag_buf, 0, bytemuck::cast_slice(&data));
         self.step = 0;

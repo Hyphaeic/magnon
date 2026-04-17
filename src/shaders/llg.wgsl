@@ -1,8 +1,31 @@
 // Magnonic Clock Simulator — LLG Compute Kernels
-// Heun's method with pitchfork stabilization
+//
+// Integrator: PROJECTED HEUN (explicit trapezoidal + post-stage renormalize).
+//   Not plain textbook Heun — we renormalize |m|=1 after both the predictor
+//   and corrector. This is standard practice in micromagnetics (MuMax3,
+//   OOMMF) because explicit discretizations of LLG do not preserve |m|=1
+//   in discrete time, and projection is a simple, stable remedy.
+//
+//   An alternative (the 2025 Peiris stabilization term) is retained as the
+//   dormant `stab_coeff` uniform for future experimentation with a
+//   smooth-correction approach. In the current code path it has no effect.
+//
+// Field convention: B_eff in Tesla (not H in A/m). See config.rs for
+// the unit convention block and conversion formulas.
+//
+// Assumed geometry: square 2D cells with isotropic in-plane spacing dx = dy.
+// Exchange stencil uses one prefactor for both directions; rectangular
+// cells would require direction-dependent prefactors.
 //
 // Buffer layout: 4 × f32 per cell (mx, my, mz, pad)
 // Grid: row-major 2D, idx = ix * ny + iy
+//
+// h_eff buffer semantics: STAGE SCRATCH, NOT OBSERVABLE STATE.
+//   Phase 0 writes B_eff(mag); phase 1 overwrites with B_eff(mag_pred).
+//   After heun_correct, h_eff reflects the predicted (mid-step) field, NOT
+//   the field of the final corrected magnetization. Do not read h_eff as
+//   the instantaneous field of the current state; add a final field
+//   recompute pass if you need that diagnostic.
 
 struct Params {
     nx: u32,
@@ -97,8 +120,15 @@ fn zeeman_field() -> vec3<f32> {
     return vec3<f32>(params.b_ext_x, params.b_ext_y, params.b_ext_z);
 }
 
-// LLG torque in Landau-Lifshitz form + pitchfork stabilization:
-//   dm/dt = -γ'(m × B) - γ'α(m × (m × B)) + A·m·(1 - |m|²)
+// LLG torque in Landau-Lifshitz form:
+//   dm/dt = -γ'(m × B) - γ'α(m × (m × B))
+// where γ' = γ/(1+α²). The LLG torque is strictly perpendicular to m
+// in the continuous equation, so |m| is conserved. Discrete integration
+// introduces O(dt²) growth in |m|, corrected by post-step normalize in
+// heun_predict/heun_correct. The pitchfork stabilization term from the
+// 2025 Peiris paper is not needed here because normalize is active;
+// stab_coeff is retained in Params for future use if normalize is
+// removed in favor of smooth stabilization (better for adaptive solvers).
 fn llg_torque(m: vec3<f32>, b_eff: vec3<f32>) -> vec3<f32> {
     let a2 = params.alpha * params.alpha;
     let gp = params.gamma / (1.0 + a2);
@@ -106,13 +136,7 @@ fn llg_torque(m: vec3<f32>, b_eff: vec3<f32>) -> vec3<f32> {
     let mxb = cross(m, b_eff);
     let mxmxb = cross(m, mxb);
 
-    var dmdt = -gp * (mxb + params.alpha * mxmxb);
-
-    // Pitchfork stabilization: asymptotically drives |m| → 1
-    let norm_sq = dot(m, m);
-    dmdt += params.stab_coeff * m * (1.0 - norm_sq);
-
-    return dmdt;
+    return -gp * (mxb + params.alpha * mxmxb);
 }
 
 // ─── Entry points ──────────────────────────────────────────────

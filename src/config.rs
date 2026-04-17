@@ -1,38 +1,56 @@
-/// Material parameters for micromagnetic simulation (SI units).
-#[derive(Clone)]
-pub struct MaterialParams {
-    /// Saturation magnetization [A/m]
-    pub ms: f64,
-    /// Exchange stiffness [J/m]
-    pub a_ex: f64,
-    /// Uniaxial anisotropy constant [J/m³]
-    pub k_u: f64,
-    /// Gilbert damping [dimensionless]
-    pub alpha: f64,
-    /// Gyromagnetic ratio [rad/(s·T)]
-    pub gamma: f64,
+// ─── Unit convention ────────────────────────────────────────────────
+//
+// This simulator evolves the normalized magnetization `m = M/Ms` under
+// an effective field expressed in TESLA (B convention), NOT in A/m (H
+// convention). All field terms — exchange, anisotropy, Zeeman — are
+// computed and summed as B_eff in Tesla, then fed to the LLG torque with
+// γ in rad/(s·T).
+//
+// Standard references and tools (OOMMF, MuMax3, Ubermag) commonly list
+// effective fields in H form (A/m). To convert:
+//
+//     B_eff [T] = μ₀ · H_eff [A/m]     (μ₀ = 4π × 10⁻⁷ T·m/A)
+//
+// Material parameters (A, Ms, K_u) are the underlying physics constants
+// in SI units, so there is no ambiguity when providing those directly.
+// The prefactor formulas below use the B-form derivations:
+//
+//     B_exch = (2A / Ms) · ∇²m         [T]   (not 2A/(μ₀·Ms))
+//     B_anis = (2K_u / Ms) · (m·û)·û    [T]   (not 2K_u/(μ₀·Ms))
+//     B_zee  = B_ext                   [T]   (user supplies Tesla)
+//
+// If you have an "H_exch coefficient" from an OOMMF-style document,
+// multiply by μ₀ before using it here.
+// ────────────────────────────────────────────────────────────────────
+
+use crate::effective::EffectiveParams;
+use crate::material::BulkMaterial;
+use crate::substrate::Substrate;
+
+/// Simulation geometry: film thickness, cell size, grid dimensions.
+///
+/// `thickness` is critical — it scales the surface-density substrate
+/// contributions (K_u_surface, D_DMI_surface) to volume-density effective
+/// parameters. A monolayer (~0.7 nm) amplifies interface effects ~10×
+/// compared to a 10-layer flake (~7 nm).
+#[derive(Clone, Debug)]
+pub struct Geometry {
+    /// Film thickness [m]
+    pub thickness: f64,
+    /// In-plane cell size [m] — assumed isotropic (dx = dy)
+    pub cell_size: f64,
+    pub nx: u32,
+    pub ny: u32,
 }
 
-impl MaterialParams {
-    /// Fe₃GeTe₂ default parameters (Garland 2026 simulation set).
-    pub fn fgt_default() -> Self {
+impl Geometry {
+    /// Thin 2D monolayer-scale geometry, default cell size ~ FGT exchange length.
+    pub fn thin_2d(nx: u32, ny: u32) -> Self {
         Self {
-            ms: 3.76e5,
-            a_ex: 1.4e-12,
-            k_u: 4.0e5,
-            alpha: 0.01,
-            gamma: 1.7595e11,
-        }
-    }
-
-    /// YIG baseline for comparison (well-characterized).
-    pub fn yig() -> Self {
-        Self {
-            ms: 1.4e5,
-            a_ex: 3.65e-12,
-            k_u: -610.0, // cubic, weak
-            alpha: 3.0e-5,
-            gamma: 1.7595e11,
+            thickness: 0.7e-9,
+            cell_size: 2.5e-9,
+            nx,
+            ny,
         }
     }
 }
@@ -40,71 +58,83 @@ impl MaterialParams {
 /// Full simulation configuration.
 #[derive(Clone)]
 pub struct SimConfig {
-    pub nx: u32,
-    pub ny: u32,
-    /// Cell size [m]
-    pub dx: f64,
+    /// Bulk material (intrinsic, substrate-independent properties)
+    pub bulk: BulkMaterial,
+    /// Substrate (contributes interface + coupling effects)
+    pub substrate: Substrate,
+    /// Geometry (thickness, cell size, grid dimensions)
+    pub geometry: Geometry,
+
     /// Timestep [s]
     pub dt: f64,
-    pub material: MaterialParams,
     /// External magnetic field [T]
     pub b_ext: [f64; 3],
-    /// Uniaxial anisotropy axis (unit vector)
+    /// Uniaxial anisotropy axis (normalized before GPU upload)
     pub u_axis: [f64; 3],
-    /// Pitchfork stabilization coefficient [1/s]
+    /// Pitchfork stabilization coefficient [1/s] — dormant (see llg.wgsl)
     pub stab_coeff: f64,
-    /// Steps between observable readback
+
     pub readback_interval: usize,
-    /// Total simulation steps
     pub total_steps: usize,
-    /// Virtual probe cell index (MTJ readout point)
     pub probe_idx: Option<u32>,
 }
 
 impl SimConfig {
-    /// Default FGT config for a given grid size.
+    /// Default FGT (effective parameters, Garland 2026) on vacuum substrate.
+    /// Reproduces pre-Phase-1 behavior for regression comparisons.
     pub fn fgt_default(nx: u32, ny: u32) -> Self {
-        let material = MaterialParams::fgt_default();
         Self {
-            nx,
-            ny,
-            dx: 2.5e-9,      // exchange length of FGT
-            dt: 1.0e-13,      // 0.1 ps — safe for explicit Heun
-            material,
+            bulk: BulkMaterial::fgt_effective(),
+            substrate: Substrate::vacuum(),
+            geometry: Geometry::thin_2d(nx, ny),
+            dt: 1.0e-13,
             b_ext: [0.0, 0.0, 0.0],
-            u_axis: [0.0, 0.0, 1.0], // PMA: c-axis
-            stab_coeff: 1.0e11,       // ~ gamma scale
+            u_axis: [0.0, 0.0, 1.0],
+            stab_coeff: 1.0e11,
             readback_interval: 100,
             total_steps: 10_000,
             probe_idx: None,
         }
     }
 
-    /// Exchange field prefactor: 2A / (Ms · dx²) [Tesla]
-    pub fn exchange_prefactor(&self) -> f64 {
-        2.0 * self.material.a_ex / (self.material.ms * self.dx * self.dx)
+    /// Compute the effective parameters that the GPU sees.
+    pub fn effective(&self) -> EffectiveParams {
+        EffectiveParams::from_parts(&self.bulk, &self.substrate, &self.geometry)
     }
 
-    /// Anisotropy field prefactor: 2K_u / Ms [Tesla]
+    pub fn nx(&self) -> u32 { self.geometry.nx }
+    pub fn ny(&self) -> u32 { self.geometry.ny }
+    pub fn cell_size(&self) -> f64 { self.geometry.cell_size }
+
+    /// Convenience: exchange-field prefactor for the Laplacian stencil.
+    pub fn exchange_prefactor(&self) -> f64 {
+        self.effective().exchange_prefactor(self.geometry.cell_size)
+    }
+
+    /// Convenience: anisotropy-field prefactor.
     pub fn anisotropy_prefactor(&self) -> f64 {
-        2.0 * self.material.k_u / self.material.ms
+        self.effective().anisotropy_prefactor()
     }
 
     pub fn print_summary(&self) {
-        let ex_pf = self.exchange_prefactor();
-        let an_pf = self.anisotropy_prefactor();
+        let eff = self.effective();
         eprintln!("=== Magnonic Clock Simulator ===");
-        eprintln!("Grid: {}x{} ({} cells)", self.nx, self.ny, self.nx * self.ny);
-        eprintln!("Cell size: {:.1} nm", self.dx * 1e9);
-        eprintln!("Domain: {:.1} nm × {:.1} nm",
-            self.nx as f64 * self.dx * 1e9,
-            self.ny as f64 * self.dx * 1e9);
-        eprintln!("Timestep: {:.2} ps", self.dt * 1e12);
-        eprintln!("Material: Ms={:.2e} A/m, A={:.2e} J/m, Ku={:.2e} J/m³, α={:.4}",
-            self.material.ms, self.material.a_ex, self.material.k_u, self.material.alpha);
-        eprintln!("Prefactors: B_exch={:.3} T, B_anis={:.3} T", ex_pf, an_pf);
-        eprintln!("B_ext: ({:.3}, {:.3}, {:.3}) T", self.b_ext[0], self.b_ext[1], self.b_ext[2]);
-        eprintln!("Stabilization: {:.2e} /s", self.stab_coeff);
+        eprintln!("Material : {}", self.bulk.name);
+        eprintln!("Substrate: {}", self.substrate.name);
+        eprintln!("Geometry : {}×{}, cell {:.2} nm, thickness {:.2} nm",
+                  self.geometry.nx, self.geometry.ny,
+                  self.geometry.cell_size * 1e9,
+                  self.geometry.thickness * 1e9);
+        eprintln!("Domain   : {:.1} × {:.1} nm",
+                  self.geometry.nx as f64 * self.geometry.cell_size * 1e9,
+                  self.geometry.ny as f64 * self.geometry.cell_size * 1e9);
+        eprintln!("Timestep : {:.2} ps", self.dt * 1e12);
+        eff.print_decomposition(&self.bulk, &self.substrate, &self.geometry);
+        eprintln!("Prefactors: B_exch={:.3} T, B_anis={:.3} T",
+                  eff.exchange_prefactor(self.geometry.cell_size),
+                  eff.anisotropy_prefactor());
+        eprintln!("B_ext    : ({:.3}, {:.3}, {:.3}) T",
+                  self.b_ext[0], self.b_ext[1], self.b_ext[2]);
         eprintln!("================================");
     }
 }
