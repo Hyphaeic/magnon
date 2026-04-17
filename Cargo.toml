@@ -1,0 +1,39 @@
+[package]
+name = "magnonic-clock-sim"
+version = "0.1.0"
+edition = "2021"
+description = "Rust/WebGPU LLG solver for magnonic time crystal simulation"
+publish = false
+
+[lib]
+name = "magnonic_clock_sim"
+path = "src/lib.rs"
+
+[[bin]]
+name = "magnonic-sim"
+path = "src/main.rs"
+
+[[bin]]
+name = "magnonic-dashboard"
+path = "src/bin/dashboard.rs"
+required-features = ["gui"]
+
+[features]
+default = []
+gui = ["dep:minifb"]
+
+[dependencies]
+wgpu = "27.0"
+bytemuck = { version = "1.22", features = ["derive"] }
+glam = "0.29"
+pollster = "0.4"
+env_logger = "0.11"
+log = "0.4"
+rand = "0.8"
+
+# GUI (optional)
+minifb = { version = "0.27", optional = true }
+
+[profile.release]
+opt-level = 3
+lto = true
