@@ -71,6 +71,7 @@ struct Params {
     layer_thermal_a_sf_r: vec4<f32>,    // precomputed R Koopmans prefactor [1/s]
     layer_thermal_t_c: vec4<f32>,       // K
     layer_thermal_alpha_0: vec4<f32>,   // dimensionless
+    layer_thermal_tau_long: vec4<f32>,  // seconds (P3b longitudinal relaxation base)
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -452,6 +453,151 @@ fn m3tm_derivs(s: M3tmState, p_laser: f32, iz: u32) -> vec3<f32> {
     let dt_p = g_ep * (s.t_e - s.t_p) / max(c_p, 1.0);
     let dm = koopmans_dmdt(s.m, s.t_e, s.t_p, r_pref, t_c);
     return vec3<f32>(dt_e, dt_p, dm);
+}
+
+// ─── Phase P3b — LLB integrator helpers + kernels ───────────────
+//
+// LLB equation (simplified form used here):
+//     dm/dt = −γ/(1 + α_⊥²) · (m × B_eff + α_⊥ · m̂ × (m̂ × B_eff))      (transverse)
+//           + rate_∥(T_s) · (m_e(T_s) − |m|) · m̂                         (longitudinal)
+//
+// with
+//     α_⊥(T) = α_0 · (1 − T/(3·T_c))        [low-T limit: α_0]
+//     α_∥(T) = α_0 · (2·T/(3·T_c))          [zero at T = 0]
+//     rate_∥(T) = α_∥(T) / tau_long_base    [1/s]
+//
+// The longitudinal part is a phenomenological exponential relaxation to
+// m_e(T_s) — stable for any dt, reduces to LLG at T = 0 (α_∥ = 0), and
+// captures ultrafast demag at high T. See ADR-003 / plan-photonic.md
+// Implementation notes for P3b for the rationale vs. full Atxitia form.
+
+fn sample_m_e(iz: u32, t: f32) -> f32 {
+    let t_c = params.layer_thermal_t_c[iz];
+    if t_c < 1.0 { return 1.0; }
+    let t_max = 1.5 * t_c;
+    let n_f = f32(LLB_TABLE_N);
+    let u = clamp(t / t_max, 0.0, 0.999999) * (n_f - 1.0);
+    let i0 = u32(floor(u));
+    let i1 = min(i0 + 1u, LLB_TABLE_N - 1u);
+    let frac = u - f32(i0);
+    let base = iz * LLB_TABLE_N;
+    return m_e_table[base + i0] * (1.0 - frac) + m_e_table[base + i1] * frac;
+}
+
+fn alpha_perp(iz: u32, t_s: f32) -> f32 {
+    let t_c = params.layer_thermal_t_c[iz];
+    if t_c < 1.0 { return params.layer_alphas[iz]; }
+    return params.layer_thermal_alpha_0[iz] * (1.0 - t_s / (3.0 * t_c));
+}
+
+fn alpha_par(iz: u32, t_s: f32) -> f32 {
+    let t_c = params.layer_thermal_t_c[iz];
+    if t_c < 1.0 { return 0.0; }
+    return params.layer_thermal_alpha_0[iz] * (2.0 * t_s / (3.0 * t_c));
+}
+
+/// LLB torque in "Euler form": returns dm/dt [1/s] for a vector m that is
+/// NOT constrained to |m|=1. Used by llb_predict / llb_correct.
+fn llb_torque(m: vec3<f32>, b_eff: vec3<f32>, iz: u32, t_s: f32) -> vec3<f32> {
+    let m_mag = max(length(m), 1e-6);
+    let m_hat = m / m_mag;
+
+    // ─ Transverse (LLG) part with temperature-dependent α_⊥ ─
+    let a_perp = max(alpha_perp(iz, t_s), 0.0);
+    let gp = params.gamma / (1.0 + a_perp * a_perp);
+    let mxb = cross(m, b_eff);
+    let mxmxb = cross(m_hat, cross(m_hat, b_eff)) * m_mag;  // keep |m| prefactor
+    var dmdt = -gp * (mxb + a_perp * mxmxb);
+
+    // ─ Longitudinal relaxation (phenomenological): drives |m| → m_e(T_s) ─
+    let a_par = alpha_par(iz, t_s);
+    let tau_base = params.layer_thermal_tau_long[iz];
+    if tau_base > 0.0 && a_par > 1e-9 {
+        let rate = a_par / tau_base;         // 1/s
+        let m_eq = sample_m_e(iz, t_s);
+        dmdt = dmdt + rate * (m_eq - m_mag) * m_hat;
+    }
+
+    // SOT (only nonzero for layer 0) — preserved from LLG path.
+    let sigma = params.layer_sigmas[iz].xyz;
+    let mxs = cross(m, sigma);
+    let mxmxs = cross(m_hat, cross(m_hat, sigma)) * m_mag;
+    dmdt = dmdt + -params.gamma * (params.layer_sot_tau_dls[iz] * mxmxs
+                                  + params.layer_sot_tau_fls[iz] * mxs);
+    return dmdt;
+}
+
+/// Field-torque phase0 replacement for LLB: reads the same B_eff that the
+/// LLG `field_torque_phase0` computes, but stores `llb_torque(m, B_eff)`
+/// rather than `llg_torque(m, B_eff)` in torque_0. Keeps b_eff in h_eff so
+/// diagnostics and any shared downstream kernels still work.
+@compute @workgroup_size(64)
+fn field_torque_phase0_llb(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if idx >= params.cell_count { return; }
+    let iz = layer_of(idx);
+    let m = read_mag(idx);
+    let b_eff = exchange_from_mag(idx) + exchange_interlayer_from_mag(idx)
+              + anisotropy_field(m, iz) + zeeman_field() + laser_field_at(idx)
+              + exchange_bias_field(iz) + dmi_from_mag(idx);
+    let t_s = temp_e[idx];
+    let t = llb_torque(m, b_eff, iz, t_s);
+    let base = idx * 4u;
+    h_eff[base] = b_eff.x; h_eff[base + 1u] = b_eff.y; h_eff[base + 2u] = b_eff.z;
+    torque_0[base] = t.x; torque_0[base + 1u] = t.y; torque_0[base + 2u] = t.z;
+}
+
+@compute @workgroup_size(64)
+fn field_torque_phase1_llb(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if idx >= params.cell_count { return; }
+    let iz = layer_of(idx);
+    let m = read_pred(idx);
+    let b_eff = exchange_from_pred(idx) + exchange_interlayer_from_pred(idx)
+              + anisotropy_field(m, iz) + zeeman_field() + laser_field_at(idx)
+              + exchange_bias_field(iz) + dmi_from_pred(idx);
+    let t_s = temp_e[idx];
+    let t = llb_torque(m, b_eff, iz, t_s);
+    let base = idx * 4u;
+    h_eff[base] = b_eff.x; h_eff[base + 1u] = b_eff.y; h_eff[base + 2u] = b_eff.z;
+    torque_1[base] = t.x; torque_1[base + 1u] = t.y; torque_1[base + 2u] = t.z;
+}
+
+@compute @workgroup_size(64)
+fn llb_predict(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if idx >= params.cell_count { return; }
+    let b = idx * 4u;
+    let m = vec3<f32>(mag[b], mag[b + 1u], mag[b + 2u]);
+    let t0 = vec3<f32>(torque_0[b], torque_0[b + 1u], torque_0[b + 2u]);
+    // NO normalize — LLB tracks |m|.
+    var m_star = m + params.dt * t0;
+    let len = length(m_star);
+    if len < 1e-6 {
+        // Floor clamp: preserve direction, clip magnitude.
+        m_star = (m / max(length(m), 1e-12)) * 1e-6;
+    }
+    mag_pred[b] = m_star.x;
+    mag_pred[b + 1u] = m_star.y;
+    mag_pred[b + 2u] = m_star.z;
+}
+
+@compute @workgroup_size(64)
+fn llb_correct(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if idx >= params.cell_count { return; }
+    let b = idx * 4u;
+    let m = vec3<f32>(mag[b], mag[b + 1u], mag[b + 2u]);
+    let t0 = vec3<f32>(torque_0[b], torque_0[b + 1u], torque_0[b + 2u]);
+    let t1 = vec3<f32>(torque_1[b], torque_1[b + 1u], torque_1[b + 2u]);
+    var m_new = m + 0.5 * params.dt * (t0 + t1);
+    let len = length(m_new);
+    if len < 1e-6 {
+        m_new = (m / max(length(m), 1e-12)) * 1e-6;
+    }
+    mag[b] = m_new.x;
+    mag[b + 1u] = m_new.y;
+    mag[b + 2u] = m_new.z;
 }
 
 @compute @workgroup_size(64)

@@ -157,6 +157,11 @@ pub struct LayerThermalParams {
     pub m_e_table: Vec<f32>,
     /// χ_∥(T_i) on uniform grid T_i ∈ [0, 1.5·t_c] [dimensionless; μ_B / (k_B·T_c)-normalized].
     pub chi_par_table: Vec<f32>,
+    /// LLB longitudinal-relaxation time constant [s]. Effective τ_∥ at temperature T
+    /// is `tau_long_base / α_∥(T)`, where `α_∥(T) = α_0 · 2T/(3 · T_c)`.
+    /// P3b phenomenological form (exponential relaxation to `m_e(T_s)`).
+    /// Default 0.3 fs for ferromagnets (gives ≈10 fs τ_∥ near T_c for α_0 = 0.04).
+    pub tau_long_base: f64,
     /// Short human-readable provenance string.
     pub notes: &'static str,
 }

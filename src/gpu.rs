@@ -134,10 +134,14 @@ struct GpuParams {
     layer_thermal_t_c: [f32; 4],
     // 624-639: low-T Gilbert damping α_0 per layer
     layer_thermal_alpha_0: [f32; 4],
+    // 640-655: P3b — per-layer longitudinal-relaxation base time [s].
+    //   τ_∥(T) = tau_long_base / α_∥(T); α_∥(T) = α_0·(2T/(3·T_c)).
+    //   At T = 0 → α_∥ = 0 → τ_∥ = ∞ (LLG reduction).
+    layer_thermal_tau_long: [f32; 4],
 }
 
 const OFFSET_PULSE_AMPLITUDES: u64 = 400;
-const OFFSET_GPUPARAMS_END: u64 = 640;
+const OFFSET_GPUPARAMS_END: u64 = 656;
 const _: () = assert!(OFFSET_GPUPARAMS_END as usize == std::mem::size_of::<GpuParams>());
 
 impl GpuParams {
@@ -260,6 +264,7 @@ impl GpuParams {
             layer_thermal_a_sf_r: Self::thermal_vec4(cfg, |p| p.r_koopmans_prefactor() as f32),
             layer_thermal_t_c: Self::thermal_vec4(cfg, |p| p.t_c as f32),
             layer_thermal_alpha_0: Self::thermal_vec4(cfg, |p| p.alpha_0 as f32),
+            layer_thermal_tau_long: Self::thermal_vec4(cfg, |p| p.tau_long_base as f32),
         }
     }
 
@@ -342,6 +347,12 @@ pub struct GpuSolver {
     predict_pipeline: wgpu::ComputePipeline,
     correct_pipeline: wgpu::ComputePipeline,
     m3tm_pipeline: wgpu::ComputePipeline,
+    // P3b — LLB path pipelines. Dispatched instead of LLG heun_* when
+    // `photonic.thermal.as_ref().map_or(false, |t| t.enable_llb)`.
+    ft_phase0_llb_pipeline: wgpu::ComputePipeline,
+    ft_phase1_llb_pipeline: wgpu::ComputePipeline,
+    llb_predict_pipeline: wgpu::ComputePipeline,
+    llb_correct_pipeline: wgpu::ComputePipeline,
 
     bind_group: wgpu::BindGroup,
 
@@ -569,6 +580,10 @@ impl GpuSolver {
         let predict_pipeline = make_pipeline("heun_predict");
         let correct_pipeline = make_pipeline("heun_correct");
         let m3tm_pipeline = make_pipeline("advance_m3tm");
+        let ft_phase0_llb_pipeline = make_pipeline("field_torque_phase0_llb");
+        let ft_phase1_llb_pipeline = make_pipeline("field_torque_phase1_llb");
+        let llb_predict_pipeline = make_pipeline("llb_predict");
+        let llb_correct_pipeline = make_pipeline("llb_correct");
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("llg_bg"),
@@ -613,6 +628,10 @@ impl GpuSolver {
             predict_pipeline,
             correct_pipeline,
             m3tm_pipeline,
+            ft_phase0_llb_pipeline,
+            ft_phase1_llb_pipeline,
+            llb_predict_pipeline,
+            llb_correct_pipeline,
             bind_group,
             cell_count,
             workgroups,
@@ -743,12 +762,27 @@ impl GpuSolver {
                 p.dispatch_workgroups(wg, 1, 1);
             }
 
-            for pipeline in [
-                &self.ft_phase0_pipeline,
-                &self.predict_pipeline,
-                &self.ft_phase1_pipeline,
-                &self.correct_pipeline,
-            ] {
+            let enable_llb = self.config
+                .photonic
+                .thermal
+                .as_ref()
+                .map_or(false, |t| t.enable_llb);
+            let pipelines: [&wgpu::ComputePipeline; 4] = if enable_llb {
+                [
+                    &self.ft_phase0_llb_pipeline,
+                    &self.llb_predict_pipeline,
+                    &self.ft_phase1_llb_pipeline,
+                    &self.llb_correct_pipeline,
+                ]
+            } else {
+                [
+                    &self.ft_phase0_pipeline,
+                    &self.predict_pipeline,
+                    &self.ft_phase1_pipeline,
+                    &self.correct_pipeline,
+                ]
+            };
+            for pipeline in pipelines {
                 let mut p = encoder.begin_compute_pass(&Default::default());
                 p.set_pipeline(pipeline);
                 p.set_bind_group(0, &self.bind_group, &[]);

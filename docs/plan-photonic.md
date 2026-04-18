@@ -780,3 +780,28 @@ Ready to execute Phase P3a on your go-ahead. Estimated session length for P3a: 2
 **Deviations from §3.5:** ADR-003 documents four — append-at-end `GpuParams` layout (vs. shift-to-592), single-shader file (vs. split `llg.wgsl`/`m3tm.wgsl`), `pulse_directions[p].w` as the M3TM source-density channel, raised storage-buffer limit.
 
 **Deferred to P3b/P3c:** µMAG SP4 regression harness (requires deterministic initial state infrastructure), host-side adaptive dt sub-looping (host-side dt-cap not yet enforced — `thermal_dt_cap` stored but advisory in P3a), back-coupling from M3TM to LLG torque (explicitly out of P3a scope per the plan).
+
+### Implementation notes for P3b
+
+**Status:** Complete, 2026-04-18. Commit at boundary; awaiting approval to start P3c.
+
+**What landed:**
+- `src/shaders/llg.wgsl` — LLB helpers (`sample_m_e`, `alpha_perp`, `alpha_par`, `llb_torque`). New entry points `field_torque_phase0_llb`, `field_torque_phase1_llb`, `llb_predict`, `llb_correct`. LLB predict/correct do NOT post-normalize; |m| is now state. Floor clamp at 1e-6 preserves direction and avoids div-by-zero in the torque.
+- `src/photonic.rs` — `LayerThermalParams.tau_long_base` (default 0.3 fs for ferromagnets; YIG inherits default but a_sf=0 makes the M3TM source inert).
+- `src/gpu.rs` — `GpuParams` grows to 656 B (adds `layer_thermal_tau_long`); four new compute pipelines for the LLB path; dual-integrator dispatch in `step_n` selects LLG or LLB based on `photonic.thermal.enable_llb`. Thermal-off and thermal-on-LLB-off paths untouched.
+- `examples/test_llb_reduces_to_llg.rs` — LLB → LLG reduction gate at T_ambient = 0 K.
+- `examples/test_llb_ni_demag.rs` — LLB + M3TM end-to-end under a 1 mJ/cm² Ni-like pulse.
+
+**Phenomenological longitudinal-relaxation form.** Rather than implement the full Atxitia 2011 LLB longitudinal term (which in SI requires converting the dimensionless χ_∥ table into an effective-field susceptibility with material-specific prefactors), P3b ships a simplified exponential relaxation:
+
+    d|m|/dt |_long = (α_∥(T_s) / tau_long_base) · (m_e(T_s) − |m|) · m̂
+
+At T = 0: α_∥ = 0 → rate = 0 → LLB = LLG. Near T_c: rate ≈ (2α_0/3) / tau_long_base; for Ni (α_0=0.04, tau_long_base=0.3 fs) this is ~9·10¹³/s, giving τ_∥ ≈ 10 fs — consistent with ultrafast-demag time scales. The Atxitia-form longitudinal torque (with χ_∥^-1 as the effective field prefactor) is deferred; `tau_long_base` is the P3b calibration handle and can be overridden per-material. The chi_par_table buffer remains bound (and populated) but unread by the current LLB path — it is retained for a drop-in upgrade in P3c or P5.
+
+**Acceptance evidence:**
+- **LLG regression (thermal off)**: `--steps 2000` fgt_default run `min_norm`/`max_norm` columns match the pre-thermal-baseline byte-for-byte.
+- **LLB → LLG reduction (T = 0 K)**: `test_llb_reduces_to_llg` — max |Δavg_mz| = **4.7×10⁻⁵** over 500 steps (5 ps @ dt=10fs), well below the 1e-3 gate. Result is conservative since the two runs use independent RNG seeds for the 5° initial cone.
+- **LLB demag + recovery (Ni, 1 mJ/cm²)**: `test_llb_ni_demag` — T_e peaks at 953 K (above Ni T_c=627 K); |m| drops to 0 during the pulse (m_e(T_e > T_c) = 0, as expected); |m| recovers to 0.82 by 10 ps, tracking m_reduced (M3TM independent estimate) to within 0.02 absolute. No NaN.
+- **P3a gate still holds**: GPU vs host M3TM 8.8×10⁻⁷ on T_e, 1.25×10⁻⁶ on |m|.
+
+**Deferred to P3c:** M3TM → LLG torque back-coupling (remove the "M3TM advances m_reduced independently" path; LLB becomes sole owner of |m| dynamics in the shader, M3TM reads |m| from `mag` for its Koopmans R term); µMAG SP4 regression harness; Beaurepaire Ni full calibration (|m| = 0.60 at 500 fs, recovery τ ≈ 1 ps); energy-conservation gate; `docs/llb_validation.md` write-up.
