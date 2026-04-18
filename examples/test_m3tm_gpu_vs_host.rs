@@ -65,7 +65,7 @@ fn main() {
         let dt_off = t_mid - pulse.t_center;
         let env = (-(dt_off * dt_off) / (2.0 * sig_t * sig_t)).exp();
         let p_laser = p_peak * env;
-        s = advance_m3tm_cell(s, p_laser, &ni_preset, dt);
+        s = advance_m3tm_cell(s, p_laser, &ni_preset, 300.0, dt);
         host_t_e.push(s.t_e);
     }
 
@@ -77,7 +77,7 @@ fn main() {
         let dt_off = t_mid - pulse.t_center;
         let env = (-(dt_off * dt_off) / (2.0 * sig_t * sig_t)).exp();
         let p_laser = p_peak * env;
-        s2 = advance_m3tm_cell(s2, p_laser, &ni_preset, dt);
+        s2 = advance_m3tm_cell(s2, p_laser, &ni_preset, 300.0, dt);
         host_m.push(s2.m);
     }
 

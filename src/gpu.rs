@@ -142,10 +142,17 @@ struct GpuParams {
     //   τ_∥(T) = tau_long_base / α_∥(T); α_∥(T) = α_0·(2T/(3·T_c)).
     //   At T = 0 → α_∥ = 0 → τ_∥ = ∞ (LLG reduction).
     layer_thermal_tau_long: [f32; 4],
+    // 656-671: per-layer phonon-substrate coupling [W/(m³·K)] (substrate sink).
+    //   dT_p/dt |_sub = −g_sub_phonon · (T_p − t_ambient) / c_p
+    layer_thermal_g_sub_p: [f32; 4],
+    // 672-687: thermal globals — (t_ambient, pad, pad, pad).
+    //   t_ambient is shared across layers (bath reference for substrate
+    //   sink); other slots reserved for future globals.
+    thermal_globals: [f32; 4],
 }
 
 const OFFSET_PULSE_AMPLITUDES: u64 = 400;
-const OFFSET_GPUPARAMS_END: u64 = 656;
+const OFFSET_GPUPARAMS_END: u64 = 688;
 const _: () = assert!(OFFSET_GPUPARAMS_END as usize == std::mem::size_of::<GpuParams>());
 
 impl GpuParams {
@@ -273,6 +280,16 @@ impl GpuParams {
             layer_thermal_t_c: Self::thermal_vec4(cfg, |p| p.t_c as f32),
             layer_thermal_alpha_0: Self::thermal_vec4(cfg, |p| p.alpha_0 as f32),
             layer_thermal_tau_long: Self::thermal_vec4(cfg, |p| p.tau_long_base as f32),
+            layer_thermal_g_sub_p: Self::thermal_vec4(cfg, |p| p.g_sub_phonon as f32),
+            thermal_globals: {
+                let t_amb = cfg
+                    .photonic
+                    .thermal
+                    .as_ref()
+                    .map(|t| t.t_ambient)
+                    .unwrap_or(300.0);
+                [t_amb, 0.0, 0.0, 0.0]
+            },
         }
     }
 

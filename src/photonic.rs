@@ -137,6 +137,14 @@ pub struct LayerThermalParams {
     pub c_p: f64,
     /// Electron-phonon coupling [W/(m³·K)].
     pub g_ep: f64,
+    /// Phonon-substrate coupling [W/(m³·K)] — volumetric heat-sink rate into
+    /// the substrate bath. Governs the phonon cooling term
+    ///   dT_p/dt |_sub = −g_sub_phonon·(T_p − T_ambient) / c_p
+    /// which closes the energy balance for magnetic thin films on heat-
+    /// conducting substrates (sapphire, Si, etc.). Set to 0 for an isolated
+    /// film. Representative scale: `c_p / τ_sub` with τ_sub ~ 100 ps for
+    /// 20 nm metals on sapphire → ≈ 3·10¹⁶ W/(m³·K).
+    pub g_sub_phonon: f64,
     /// Koopmans Elliott-Yafet scaling (dimensionless). ≈0.185 for Ni.
     pub a_sf: f64,
     /// Atomic moment in units of μ_B (dimensionless). ≈0.6 for Ni.

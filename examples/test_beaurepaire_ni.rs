@@ -92,10 +92,20 @@ fn main() {
     let tau_ps = trajectory_ps[tau_idx] - trajectory_ps[m_min_idx];
 
     // Energy balance at end of run (t = 10 ps, pulse fully delivered).
+    // With the substrate sink active (P5-prep: g_sub_phonon) energy also
+    // leaves via ∫ g_sub·(T_p − T_amb) dt · V_cell. Approximate using the
+    // trajectory.
     let u_e_final = 0.5 * preset.gamma_e * t_e_final.powi(2);
     let u_p_final = preset.c_p * t_p_final;
     let delta_u = (u_e_final - u_e_init) * v_cell + (u_p_final - u_p_init) * v_cell;
-    let balance_ratio = delta_u / total_laser_input_per_cell;
+
+    let dt = cfg.dt;
+    let mut e_substrate = 0.0_f64;
+    for (tp, _) in trajectory_tp.iter().zip(trajectory_te.iter()) {
+        e_substrate += preset.g_sub_phonon * (tp - t_amb) * v_cell * dt;
+    }
+    let total_accounted = delta_u + e_substrate;
+    let balance_ratio = total_accounted / total_laser_input_per_cell;
 
     println!(
         "Beaurepaire Ni — 20 nm, 100 fs FWHM, 7 mJ/cm² absorbed, T_ambient=300K:"
@@ -119,10 +129,12 @@ fn main() {
     println!(
         "\nEnergy balance:"
     );
-    println!("  laser input  = {:.3e} J/cell", total_laser_input_per_cell);
-    println!("  Δ(U_e + U_p) = {:.3e} J/cell", delta_u);
+    println!("  laser input          = {:.3e} J/cell", total_laser_input_per_cell);
+    println!("  Δ(U_e + U_p) @ 10 ps = {:.3e} J/cell", delta_u);
+    println!("  ∫ substrate outflow  = {:.3e} J/cell", e_substrate);
+    println!("  total accounted      = {:.3e} J/cell", total_accounted);
     println!(
-        "  ratio = {:.3}  (target 1.00 ± 0.05; excess leaks to LLB long. dissipation)",
+        "  ratio (accounted / input) = {:.3}  (target 1.00 ± 0.05)",
         balance_ratio
     );
 

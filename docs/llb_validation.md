@@ -109,8 +109,27 @@ Well inside the plan's "3× LLG baseline" budget during thermal-active windows.
 
 - **Full Atxitia LLB** — replace the phenomenological longitudinal term with the χ_∥-coupled form, dimensionalising chi_par_table on upload. Current buffer is ready to be consumed.
 - **Two-parameter Beaurepaire fit** (a_sf, R) against published amplitude and τ → delivers the calibrated Ni M3TM set.
-- **Heat-sink boundary condition** — simplest version adds a per-cell linear coupling `g_sub · (T − T_ambient)` to T_p when below the magnetic layer, approximating substrate cooling without full ∇²T diffusion.
+- ~~**Heat-sink boundary condition**~~ — **done** post-P4 (see §6). `g_sub_phonon` per-layer term drains phonon energy toward T_ambient at rate `g_sub/c_p`.
 - **FGT calibration** (P5) — same two-parameter fit against Zhou 2025.
+
+## 5. Throughput at head (after substrate-sink addition)
+
+- LLG only, 256² grid: ≈13 k steps/s (unchanged).
+- LLG + M3TM (no LLB): ≈8–10 k steps/s.
+- Full LLB + M3TM: ≈7 k steps/s.
+
+## 6. Post-P4 addition — phonon–substrate coupling
+
+**Rationale.** Without a heat-extraction channel, a single-cell magnetic thin film traps all absorbed laser energy forever; the equilibrium phonon bath stabilises above T_c for any non-trivial fluence, which prevents magnetisation recovery and blocks quantitative matches to Beaurepaire / Zhou.
+
+**Implementation.** New field `LayerThermalParams.g_sub_phonon` [W/(m³·K)] with per-material defaults (≈3·10¹⁶ for Ni / Py / CoFeB on sapphire; ≈2·10¹⁶ for the FGT Ni-surrogate preset; 0 for YIG). Uploaded as a new per-layer vec4 (offset 656) plus a shared `thermal_globals.x = t_ambient` uniform at offset 672. Shader `m3tm_derivs` now subtracts `g_sub_phonon · (T_p − t_ambient) / c_p` from dT_p/dt. Host-reference `thermal::advance_m3tm_cell(..., t_ambient, dt)` mirrors the change (signature added a parameter; all call sites updated).
+
+**Post-addition gates:**
+- All P3/P4 regressions green (GPU vs host 1.0·10⁻⁶ / 9.5·10⁻⁷; SP4 proxy unchanged; LLB→LLG unchanged; pump-probe distinct responses).
+- **Energy balance (Beaurepaire config, 7 mJ/cm² / 10 ps):** `Δ(U_e + U_p) + ∫ g_sub·(T_p − T_amb) dt · V_cell = 1.000 × laser_input` — closes to the third decimal when the substrate outflow channel is included.
+- Substrate extracts **6.4 %** of laser input over 10 ps for Ni's default g_sub=3·10¹⁶ (cooling time constant ≈ 100 ps — expected for 20 nm film on sapphire).
+
+**Beaurepaire quantitative miss persists at 500 fs** — substrate cooling is too slow to help in the first ps; the miss reflects the absence of optical-skin-depth modeling and lateral diffusion, not the newly-added sink. 7 mJ/cm² _absorbed_ into 20 nm raises T_e above 2400 K which pins |m|=0. Matching Beaurepaire now requires calibrating reflectivity (real Ni at 400 nm has R≈0.45) or using thicker films — parameter-fit work, not physics-model work.
 
 ## 5. How to reproduce
 

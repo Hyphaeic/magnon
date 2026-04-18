@@ -4,9 +4,9 @@
 //!   1. Unit-test oracle for the GPU `advance_m3tm` kernel (1e-3 relative match).
 //!   2. Readable source-of-truth for the Koopmans 2010 equations.
 //!
-//! Physics (Koopmans 2010 eq. 3-4):
+//! Physics (Koopmans 2010 eq. 3-4, extended with a substrate-sink term on T_p):
 //!     C_e(T_e) dT_e/dt = −g_ep·(T_e − T_p) + P_laser − R·m·(T_p/T_c)·(1 − m·coth(m·T_c/T_e))·E_mag
-//!     C_p       dT_p/dt =  g_ep·(T_e − T_p)
+//!     C_p       dT_p/dt =  g_ep·(T_e − T_p) − g_sub·(T_p − T_ambient)
 //!              dm/dt  =  R·m·(T_p/T_c)·(1 − m·coth(m·T_c/T_e))
 //!
 //! with C_e(T_e) = γ_e · T_e. We drop the magnetic back-reaction energy term
@@ -45,10 +45,11 @@ pub fn advance_m3tm_cell(
     s: M3tmState,
     p_laser: f64,
     params: &LayerThermalParams,
+    t_ambient: f64,
     dt: f64,
 ) -> M3tmState {
     let r = params.r_koopmans_prefactor();
-    let k = M3tmDerivs { r, params };
+    let k = M3tmDerivs { r, params, t_ambient };
 
     // Heun predictor: Euler step.
     let d1 = k.derivs(s, p_laser);
@@ -70,6 +71,7 @@ pub fn advance_m3tm_cell(
 struct M3tmDerivs<'a> {
     r: f64,
     params: &'a LayerThermalParams,
+    t_ambient: f64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -85,7 +87,8 @@ impl<'a> M3tmDerivs<'a> {
         // C_e(T_e) = γ_e · T_e; guard against T_e = 0.
         let c_e = (p.gamma_e * s.t_e).max(1.0);
         let dt_e = (p_laser - p.g_ep * (s.t_e - s.t_p)) / c_e;
-        let dt_p = p.g_ep * (s.t_e - s.t_p) / p.c_p.max(1.0);
+        let dt_p = (p.g_ep * (s.t_e - s.t_p) - p.g_sub_phonon * (s.t_p - self.t_ambient))
+            / p.c_p.max(1.0);
 
         let dm = if self.r.abs() < 1e-20 || s.t_e < 1.0 || p.t_c < 1e-12 {
             0.0
@@ -131,7 +134,7 @@ mod tests {
         let m_eq = p.sample_m_e(t_amb);
         let mut s = M3tmState::at_ambient(t_amb, m_eq);
         for _ in 0..1000 {
-            s = advance_m3tm_cell(s, 0.0, &p, 1e-15);
+            s = advance_m3tm_cell(s, 0.0, &p, t_amb, 1e-15);
         }
         assert!((s.t_e - t_amb).abs() < 1e-3, "T_e drifted: {}", s.t_e);
         assert!((s.t_p - t_amb).abs() < 1e-3, "T_p drifted: {}", s.t_p);
@@ -159,7 +162,7 @@ mod tests {
             let t = i as f64 * dt;
             let env = (-((t - t_peak).powi(2)) / (2.0 * sigma * sigma)).exp();
             let p_laser = p_peak * env;
-            s = advance_m3tm_cell(s, p_laser, &p, dt);
+            s = advance_m3tm_cell(s, p_laser, &p, 300.0, dt);
             min_m = min_m.min(s.m);
         }
         // Sanity envelope: |m| should drop non-trivially (> 20%) but not go

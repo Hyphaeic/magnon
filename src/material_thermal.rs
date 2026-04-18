@@ -41,6 +41,7 @@ pub fn ni_m3tm() -> LayerThermalParams {
         gamma_e: 1.065e3,   // J/(m³·K²); Lin/Zhigilei 2008
         c_p: 3.0e6,         // J/(m³·K); Dulong-Petit near ambient for Ni
         g_ep: 8.0e17,       // W/(m³·K); Koopmans 2010
+        g_sub_phonon: 3.0e16,  // τ_sub ≈ 100 ps for 20 nm Ni on sapphire
         a_sf: 0.185,
         mu_atom_bohr: 0.6,
         v_atom: 1.094e-29,  // m³; fcc Ni
@@ -63,6 +64,7 @@ pub fn py_m3tm() -> LayerThermalParams {
         gamma_e: 7.1e2,
         c_p: 3.5e6,
         g_ep: 1.0e18,
+        g_sub_phonon: 3.0e16,
         a_sf: 0.08,         // Battiato estimate for Py
         mu_atom_bohr: 1.0,
         v_atom: 1.18e-29,
@@ -86,6 +88,7 @@ pub fn fgt_ni_surrogate() -> LayerThermalParams {
         gamma_e: 1.0e3,     // vdW metal, rough estimate
         c_p: 2.5e6,
         g_ep: 5.0e17,
+        g_sub_phonon: 2.0e16,  // weaker sink: vdW contact, worse thermal conduction
         a_sf: 0.185,        // Ni surrogate — UNCALIBRATED for FGT
         mu_atom_bohr: 1.6,  // Leon-Brito 2016 bulk Fe moment ≈ 1.6 μ_B
         v_atom: 3.5e-29,    // FGT unit cell / atoms
@@ -108,6 +111,7 @@ pub fn yig_inert() -> LayerThermalParams {
         gamma_e: 0.0,
         c_p: 3.5e6,
         g_ep: 0.0,
+        g_sub_phonon: 0.0,     // inert — no thermal coupling to worry about
         a_sf: 0.0,          // insulator — no Elliott-Yafet
         mu_atom_bohr: 5.0,
         v_atom: 2.0e-28,    // garnet unit cell
@@ -130,6 +134,7 @@ pub fn cofeb_m3tm() -> LayerThermalParams {
         gamma_e: 7.0e2,
         c_p: 3.2e6,
         g_ep: 1.1e18,
+        g_sub_phonon: 3.0e16,
         a_sf: 0.15,
         mu_atom_bohr: 1.7,
         v_atom: 1.2e-29,

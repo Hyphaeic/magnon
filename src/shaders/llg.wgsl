@@ -72,6 +72,8 @@ struct Params {
     layer_thermal_t_c: vec4<f32>,       // K
     layer_thermal_alpha_0: vec4<f32>,   // dimensionless
     layer_thermal_tau_long: vec4<f32>,  // seconds (P3b longitudinal relaxation base)
+    layer_thermal_g_sub_p: vec4<f32>,   // W/(m³·K) — phonon → substrate sink
+    thermal_globals: vec4<f32>,         // (t_ambient, pad, pad, pad)
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -447,10 +449,16 @@ fn m3tm_derivs(s: M3tmState, p_laser: f32, iz: u32) -> vec3<f32> {
     let g_ep = params.layer_thermal_g_ep[iz];
     let r_pref = params.layer_thermal_a_sf_r[iz];
     let t_c = params.layer_thermal_t_c[iz];
+    let g_sub = params.layer_thermal_g_sub_p[iz];
+    let t_ambient = params.thermal_globals.x;
 
     let c_e = max(gamma_e * s.t_e, 1.0);
     let dt_e = (p_laser - g_ep * (s.t_e - s.t_p)) / c_e;
-    let dt_p = g_ep * (s.t_e - s.t_p) / max(c_p, 1.0);
+    // Substrate sink acts on the phonon bath: heat flows to the substrate
+    // reservoir proportional to (T_p − T_ambient). Energy released by the
+    // lattice is not tracked within the simulation (the substrate is an
+    // external heat bath), so the energy-balance gate must now include it.
+    let dt_p = (g_ep * (s.t_e - s.t_p) - g_sub * (s.t_p - t_ambient)) / max(c_p, 1.0);
     let dm = koopmans_dmdt(s.m, s.t_e, s.t_p, r_pref, t_c);
     return vec3<f32>(dt_e, dt_p, dm);
 }
