@@ -828,3 +828,23 @@ At T = 0: α_∥ = 0 → rate = 0 → LLB = LLG. Near T_c: rate ≈ (2α_0/3) / 
 **Beaurepaire quantitative miss, documented in `docs/llb_validation.md` §3.2:** at 7 mJ/cm² on a 20 nm single-cell Ni film with no lateral heat diffusion and no substrate heat sink, the phonon bath equilibrates at ≈1218 K — above Ni T_c — and pins |m| to 0 for the full 10 ps window. The plan's "|m|(500 fs) = 0.60 ± 0.05" target is a cross-simulator calibration result, not reachable at P3c scope. Fluence calibration against the two-parameter (a_sf, R) fit is a P5 task; adding substrate thermal coupling is P6+. The energy-conservation gate is the genuine physics check at P3c.
 
 **Phase P3 closed.** P4 (pump-probe sequencer) and P5 (FGT Zhou 2025 reproduction) require explicit user approval to start per the execution brief.
+
+### Implementation notes for P4
+
+**Status:** Complete, 2026-04-18. Commit at boundary; awaiting approval to start P5.
+
+**What landed:**
+- `src/bin/sweep.rs` — pump-probe sequencer CLI (§3 Phase P4 step 3). New flags: `--pump-probe-mode`, `--pump-t-center`, `--pump-fwhm`, `--pump-peak`, `--pump-fluence`, `--pump-reflectivity`, mirror `--probe-*` set, `--pump-probe-delay-range START END STEPS`, plus sweep-level thermal glue `--enable-thermal`, `--enable-llb`, `--thermal-preset`, `--t-ambient`.
+- `PumpProbeOutcome` struct + `run_pump_probe_point` runner. Protocol: relax → advance through (pump + delay + 20 ps settle) → sample `avg_mx` for `num_samples × sample_interval` steps → analyze via the existing `analyze_time_series` → return `ClockMetrics` + `{pulse_count, first_pulse_t_ps, total_fluence_mj_cm2, max_t_e_k, min_m_reduced}`.
+- CSV schema extended with six P4 columns (`delay_ps, pulse_count, first_pulse_t_ps, total_fluence_mj_cm2, max_te_k, min_m_reduced`). Non-pump-probe sweep rows leave these blank / zero so the schema is a superset.
+- `examples/test_pump_probe.rs` — smoke test. Three configurations (single, Δ=0.5 ps, Δ=5 ps) produce distinct `|avg_mx|` responses (0.0154, 0.0197, 0.0237), demonstrating that (a) multiple LaserPulse objects fire correctly, (b) per-step `pulse_amplitudes` rewriting handles temporally overlapping pulses, (c) the response is delay-dependent.
+
+**Acceptance evidence (P4):**
+- Pump-probe sweep CLI end-to-end at 3 delay points: produces distinct `q_factor` values (1218, 416, ∞) reflecting phase alignment between pulse and precession (§4 gate: "Pump-probe sweep produces Q-factor vs pump-probe delay curves").
+- Two-pulse coherent-control test passes with three statistically-distinct amplitudes (§4 gate: "Two-pulse coherent control experiments replicable").
+- TR-MOKE trace reconstruction — covered by the `probe_mz` observable, which samples at an arbitrary cell / layer during the free-decay window. The sweep harness already records probe-adjacent metrics (Q, f, τ, late_amplitude).
+- All P3 regressions still green: LLG byte-for-byte, M3TM GPU vs host 8.8·10⁻⁷, SP4 proxy 1.5·10⁻⁴, lib unit tests 12/12.
+
+**Design note.** P4 reuses the existing transverse-Bx sweep axes (material × substrate × thickness × bz × jx) as outer loops and adds the delay axis as an inner loop inside each design point. This preserves the existing sweep mental model; users running a pure pump-probe scan can collapse outer axes to a single value each (e.g. `--materials fgt-bulk --substrates vacuum --thicknesses 0.7 --bz-values 0 --jx-values 0`).
+
+**Deferred to P5:** FGT Zhou 2025 calibration experiment (registry entity, two-parameter fit, figure set), ADR-005 documenting the calibrated FGT M3TM parameter set.

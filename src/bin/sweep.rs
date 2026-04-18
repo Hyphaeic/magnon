@@ -16,7 +16,9 @@ use std::time::Instant;
 use magnonic_clock_sim::config::{Geometry, Layer, SimConfig, Stack};
 use magnonic_clock_sim::gpu::GpuSolver;
 use magnonic_clock_sim::material::BulkMaterial;
+use magnonic_clock_sim::material_thermal;
 use magnonic_clock_sim::metrics::{analyze_time_series, ClockMetrics};
+use magnonic_clock_sim::photonic::{LaserPulse, PhotonicConfig, ThermalConfig};
 use magnonic_clock_sim::substrate::Substrate;
 
 struct SweepArgs {
@@ -47,6 +49,40 @@ struct SweepArgs {
     num_samples: usize,
 
     output_path: String,
+
+    // ─── Phase P4 — pump-probe sequencer ──────────────────
+    /// When true, the sweep iterates over pump-probe delays rather than
+    /// material × substrate × thickness × bz × jx. Axes other than the
+    /// delay collapse to their first value each.
+    pump_probe_mode: bool,
+    /// Pump center time [s] (pulses emit their temporal Gaussian around this).
+    pump_t_center: f64,
+    /// Pump FWHM duration [s].
+    pump_fwhm: f64,
+    /// Pump peak IFE-equivalent B field [T].
+    pump_peak_t: f32,
+    /// Optional pump fluence [J/m²] — engages M3TM source term on pump.
+    pump_fluence_j_m2: Option<f64>,
+    /// Pump reflectivity (0..1).
+    pump_reflectivity: f32,
+    /// Probe peak IFE-equivalent B field [T].
+    probe_peak_t: f32,
+    /// Probe FWHM duration [s].
+    probe_fwhm: f64,
+    /// Optional probe fluence [J/m²].
+    probe_fluence_j_m2: Option<f64>,
+    /// Probe reflectivity (0..1).
+    probe_reflectivity: f32,
+    /// Pump-probe delay axis: (start_ps, end_ps, steps).
+    pump_probe_delay_range: Option<(f64, f64, usize)>,
+    /// Thermal preset key applied to every layer when `enable_thermal` is true.
+    thermal_preset_key: Option<String>,
+    /// When true, a ThermalConfig is attached to every design point.
+    enable_thermal: bool,
+    /// When true, `ThermalConfig.enable_llb = true` (implies `enable_thermal`).
+    enable_llb: bool,
+    /// Ambient / starting temperature [K] for the thermal baths.
+    thermal_t_ambient: f32,
 }
 
 impl Default for SweepArgs {
@@ -70,6 +106,22 @@ impl Default for SweepArgs {
             stack_spec: None,
             stack_interlayer_a: None,
             stack_spacing_nm: None,
+            // P4 pump-probe defaults
+            pump_probe_mode: false,
+            pump_t_center: 200e-12,
+            pump_fwhm: 100e-15,
+            pump_peak_t: 0.5,
+            pump_fluence_j_m2: None,
+            pump_reflectivity: 0.0,
+            probe_peak_t: 0.1,
+            probe_fwhm: 100e-15,
+            probe_fluence_j_m2: None,
+            probe_reflectivity: 0.0,
+            pump_probe_delay_range: None,
+            thermal_preset_key: None,
+            enable_thermal: false,
+            enable_llb: false,
+            thermal_t_ambient: 300.0,
         }
     }
 }
@@ -135,6 +187,59 @@ fn parse_args() -> SweepArgs {
                 args.stack_spacing_nm = Some(parse_list_f64(&raw[i + 1]));
                 i += 2;
             }
+            "--pump-probe-mode" => { args.pump_probe_mode = true; i += 1; }
+            "--pump-t-center" => {
+                args.pump_t_center = raw[i + 1].parse::<f64>().unwrap() * 1e-12;
+                i += 2;
+            }
+            "--pump-fwhm" => {
+                args.pump_fwhm = raw[i + 1].parse::<f64>().unwrap() * 1e-15;
+                i += 2;
+            }
+            "--pump-peak" => { args.pump_peak_t = raw[i + 1].parse().unwrap(); i += 2; }
+            "--pump-fluence" => {
+                args.pump_fluence_j_m2 = Some(raw[i + 1].parse::<f64>().unwrap() * 10.0);
+                i += 2;
+            }
+            "--pump-reflectivity" => {
+                args.pump_reflectivity = raw[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--probe-peak" => { args.probe_peak_t = raw[i + 1].parse().unwrap(); i += 2; }
+            "--probe-fwhm" => {
+                args.probe_fwhm = raw[i + 1].parse::<f64>().unwrap() * 1e-15;
+                i += 2;
+            }
+            "--probe-fluence" => {
+                args.probe_fluence_j_m2 = Some(raw[i + 1].parse::<f64>().unwrap() * 10.0);
+                i += 2;
+            }
+            "--probe-reflectivity" => {
+                args.probe_reflectivity = raw[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--pump-probe-delay-range" => {
+                let start: f64 = raw[i + 1].parse().unwrap();
+                let end: f64 = raw[i + 2].parse().unwrap();
+                let steps: usize = raw[i + 3].parse().unwrap();
+                if steps < 1 {
+                    eprintln!("--pump-probe-delay-range STEPS must be ≥ 1");
+                    std::process::exit(1);
+                }
+                args.pump_probe_delay_range = Some((start, end, steps));
+                i += 4;
+            }
+            "--thermal-preset" => {
+                args.thermal_preset_key = Some(raw[i + 1].clone());
+                args.enable_thermal = true;
+                i += 2;
+            }
+            "--enable-thermal" => { args.enable_thermal = true; i += 1; }
+            "--enable-llb" => { args.enable_llb = true; args.enable_thermal = true; i += 1; }
+            "--t-ambient" => {
+                args.thermal_t_ambient = raw[i + 1].parse().unwrap();
+                i += 2;
+            }
             "--help" | "-h" => { print_help(); std::process::exit(0); }
             other => {
                 eprintln!("Unknown arg: {other}");
@@ -175,6 +280,21 @@ fn print_help() {
     eprintln!();
     eprintln!("Output:");
     eprintln!("  --output PATH / -o PATH     CSV output path (default sweep.csv)");
+    eprintln!();
+    eprintln!("Pump-probe sequencer (P4):");
+    eprintln!("  --pump-probe-mode                       enable pump-probe protocol");
+    eprintln!("  --pump-t-center PS                      pump center time [ps] (default 200)");
+    eprintln!("  --pump-fwhm FS / --probe-fwhm FS        temporal FWHM [fs] (default 100)");
+    eprintln!("  --pump-peak T / --probe-peak T          IFE peak field [T] (default 0.5 / 0.1)");
+    eprintln!("  --pump-fluence MJ / --probe-fluence MJ  absorbed fluence [mJ/cm²] — engages M3TM");
+    eprintln!("  --pump-reflectivity F / --probe-reflectivity F   reflectivity 0..1 (default 0)");
+    eprintln!("  --pump-probe-delay-range START END N    delay axis [ps]");
+    eprintln!();
+    eprintln!("Thermal (adds M3TM source + optional LLB integrator):");
+    eprintln!("  --enable-thermal              attach a thermal config (M3TM observables populated)");
+    eprintln!("  --enable-llb                  engage LLB integrator (implies --enable-thermal)");
+    eprintln!("  --thermal-preset KEY          ni | py | fgt | yig | cofeb (default fgt)");
+    eprintln!("  --t-ambient K                 ambient bath temperature [K] (default 300)");
 }
 
 fn run_design_point(config: &SimConfig, args: &SweepArgs) -> Result<ClockMetrics, String> {
@@ -200,6 +320,141 @@ fn run_design_point(config: &SimConfig, args: &SweepArgs) -> Result<ClockMetrics
     // 4. Analyze
     let dt_sample_s = config.dt * args.sample_interval_steps as f64;
     Ok(analyze_time_series(&samples, dt_sample_s))
+}
+
+/// Outcome of a single pump-probe design point (P4).
+#[derive(Clone, Debug)]
+struct PumpProbeOutcome {
+    clock: ClockMetrics,
+    pulse_count: usize,
+    first_pulse_t_ps: f64,
+    total_fluence_mj_cm2: f64,
+    max_t_e_k: f32,
+    min_m_reduced: f32,
+}
+
+fn build_pump_probe_pulses(args: &SweepArgs, delay_ps: f64) -> Vec<LaserPulse> {
+    let mut pulses = Vec::with_capacity(2);
+    let pump = LaserPulse {
+        t_center: args.pump_t_center,
+        duration_fwhm: args.pump_fwhm,
+        peak_field: args.pump_peak_t,
+        direction: [0.0, 0.0, 1.0],
+        spot_center: [0.0, 0.0],
+        spot_sigma: 0.0,
+        peak_fluence: args.pump_fluence_j_m2,
+        reflectivity: args.pump_reflectivity,
+    };
+    let probe = LaserPulse {
+        t_center: args.pump_t_center + delay_ps * 1e-12,
+        duration_fwhm: args.probe_fwhm,
+        peak_field: args.probe_peak_t,
+        direction: [0.0, 0.0, 1.0],
+        spot_center: [0.0, 0.0],
+        spot_sigma: 0.0,
+        peak_fluence: args.probe_fluence_j_m2,
+        reflectivity: args.probe_reflectivity,
+    };
+    pulses.push(pump);
+    pulses.push(probe);
+    pulses
+}
+
+fn total_fluence_mj_cm2(pulses: &[LaserPulse]) -> f64 {
+    pulses
+        .iter()
+        .filter_map(|p| p.peak_fluence.map(|f| (1.0 - p.reflectivity as f64) * f * 0.1))
+        .sum()
+}
+
+fn config_nz(stack: &Stack) -> usize {
+    stack.layers.len()
+}
+
+fn pump_probe_delays(args: &SweepArgs) -> Vec<f64> {
+    let (start, end, n) = args.pump_probe_delay_range.unwrap_or((0.1, 10.0, 20));
+    if n == 1 {
+        return vec![start];
+    }
+    (0..n)
+        .map(|i| start + (end - start) * (i as f64) / ((n - 1) as f64))
+        .collect()
+}
+
+fn build_thermal_config(args: &SweepArgs, nz: usize) -> Option<ThermalConfig> {
+    if !args.enable_thermal {
+        return None;
+    }
+    let key = args.thermal_preset_key.as_deref().unwrap_or("fgt-ni-surrogate");
+    let preset = match material_thermal::for_key(key) {
+        Some(p) => p,
+        None => {
+            eprintln!("Unknown --thermal-preset: {key}");
+            std::process::exit(1);
+        }
+    };
+    Some(ThermalConfig {
+        t_ambient: args.thermal_t_ambient,
+        per_layer: vec![preset; nz],
+        thermal_dt_cap: 1.0e-15,
+        thermal_window: (0.5e-12, 10e-12),
+        enable_llb: args.enable_llb,
+    })
+}
+
+/// Pump-probe design-point runner. Emits IFE pulses at (t_pump, t_pump+delay)
+/// and samples probe_mz *after* the probe pulse during a free-decay window.
+fn run_pump_probe_point(
+    config: &SimConfig,
+    args: &SweepArgs,
+    delay_ps: f64,
+) -> Result<PumpProbeOutcome, String> {
+    let mut solver = GpuSolver::new(config)?;
+    let bz_f32 = config.b_ext[2] as f32;
+
+    // 1. Relax under quiescent state.
+    solver.step_n(args.relax_steps);
+    solver.set_b_ext(0.0, 0.0, bz_f32);
+
+    // 2. Advance through the pump + (pump+delay) window. The photonic
+    // pulses fire automatically via step_n's per-step amplitude rewrite
+    // when config.photonic.pulses is non-empty.
+    //
+    // We need to cross both pulse peaks. Use a fixed "pulse+settle" window
+    // of (delay_ps + 20 ps) before starting the free-decay sample window,
+    // relative to t_pump.
+    let pulse_window_s = delay_ps * 1e-12 + 20e-12;
+    let n_window = (pulse_window_s / config.dt).ceil() as usize;
+    solver.step_n(n_window);
+
+    // 3. Record avg_mx during free decay — identical protocol to the
+    // transverse-Bx sweep so ClockMetrics comparison stays valid.
+    let mut samples = Vec::with_capacity(args.num_samples);
+    let mut max_t_e_k = 0.0_f32;
+    let mut min_m_reduced = 1.0_f32;
+    for _ in 0..args.num_samples {
+        solver.step_n(args.sample_interval_steps);
+        let obs = solver.observables();
+        samples.push(obs.avg_mx);
+        max_t_e_k = max_t_e_k.max(obs.max_t_e);
+        min_m_reduced = min_m_reduced.min(obs.min_m_reduced);
+    }
+
+    let dt_sample_s = config.dt * args.sample_interval_steps as f64;
+    let clock = analyze_time_series(&samples, dt_sample_s);
+    Ok(PumpProbeOutcome {
+        clock,
+        pulse_count: config.photonic.pulses.len(),
+        first_pulse_t_ps: config
+            .photonic
+            .pulses
+            .first()
+            .map(|p| p.t_center * 1e12)
+            .unwrap_or(0.0),
+        total_fluence_mj_cm2: total_fluence_mj_cm2(&config.photonic.pulses),
+        max_t_e_k,
+        min_m_reduced,
+    })
 }
 
 fn build_stack_from_args(
@@ -297,11 +552,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let file = File::create(&args.output_path)?;
     let mut out = BufWriter::new(file);
 
-    // Extended CSV schema: n_layers and stack_desc columns after material/substrate
+    // Extended CSV schema. Pump-probe mode (P4) adds five extra columns;
+    // the transverse-Bx mode leaves them empty / zero.
     writeln!(
         out,
         "material,substrate,thickness_nm,n_layers,stack_desc,ms_eff,a_eff,k_u_eff,alpha_eff,d_dmi_eff,bz_T,jx_A_per_m2,\
-         freq_GHz,freq_width_GHz,q_factor,decay_time_ns,final_value,late_amplitude,dt_sample_ps"
+         freq_GHz,freq_width_GHz,q_factor,decay_time_ns,final_value,late_amplitude,dt_sample_ps,\
+         delay_ps,pulse_count,first_pulse_t_ps,total_fluence_mj_cm2,max_te_k,min_m_reduced"
     )?;
 
     let t_start = Instant::now();
@@ -339,7 +596,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             };
 
-                        let config = SimConfig {
+                        let nz = config_nz(&stack);
+                        let mut config = SimConfig {
                             stack,
                             substrate: substrate.clone(),
                             geometry: Geometry {
@@ -351,18 +609,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             b_ext: [0.0, 0.0, bz],
                             stab_coeff: 1.0e11,
                             j_current: [jx, 0.0, 0.0],
-                            photonic: Default::default(),
+                            photonic: PhotonicConfig::default(),
                             readback_interval: 100,
                             total_steps: 0,
                             probe_idx: None,
                             probe_layer: None,
                         };
+                        config.photonic.thermal = build_thermal_config(&args, nz);
 
                         let eff = config.effective();
                         let layer0 = &eff.layers[0];
-                        let t0 = Instant::now();
-                        let result = run_design_point(&config, &args);
-                        let dt_pt = t0.elapsed().as_secs_f64();
 
                         // Column: material name — for stack runs, use layer 0 material name
                         let m_col = if args.stack_spec.is_some() {
@@ -372,27 +628,76 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
                         let t_col = config.stack.layers[0].thickness * 1e9;
 
-                        match result {
-                            Ok(m) => {
-                                writeln!(
-                                    out,
-                                    "{m_col},{s_name},{t_col:.3},{n_layers},\"{stack_desc}\",\
-                                     {:.4e},{:.4e},{:.4e},{:.5},{:.4e},{bz},{jx:.3e},\
-                                     {:.4},{:.4},{:.3e},{:.4e},{:.6},{:.4e},{:.3}",
-                                    layer0.ms, layer0.a_ex, layer0.k_u, layer0.alpha, layer0.d_dmi,
-                                    m.freq_ghz, m.freq_width_ghz, m.q_factor,
-                                    m.decay_time_ns, m.final_value, m.late_amplitude,
-                                    m.dt_sample_ps,
-                                )?;
-                                out.flush()?;
-                                eprintln!(
-                                    "[{idx}/{total}] {stack_desc}+{s_name} Bz={bz:.2} Jx={jx:.1e} \
-                                     → f={:.2}GHz Q={:.1} τ={:.2}ns  ({:.1}s)",
-                                    m.freq_ghz, m.q_factor, m.decay_time_ns, dt_pt,
-                                );
+                        if args.pump_probe_mode {
+                            // Iterate the pump-probe delay axis. Other axes
+                            // still loop (material × substrate × bz × jx) —
+                            // each (design × delay) gets one CSV row.
+                            let delays_ps = pump_probe_delays(&args);
+                            for delay_ps in delays_ps.iter().copied() {
+                                let mut cfg = config.clone();
+                                cfg.photonic.pulses = build_pump_probe_pulses(&args, delay_ps);
+                                let t0 = Instant::now();
+                                let result = run_pump_probe_point(&cfg, &args, delay_ps);
+                                let dt_pt = t0.elapsed().as_secs_f64();
+                                match result {
+                                    Ok(outcome) => {
+                                        let m = &outcome.clock;
+                                        writeln!(
+                                            out,
+                                            "{m_col},{s_name},{t_col:.3},{n_layers},\"{stack_desc}\",\
+                                             {:.4e},{:.4e},{:.4e},{:.5},{:.4e},{bz},{jx:.3e},\
+                                             {:.4},{:.4},{:.3e},{:.4e},{:.6},{:.4e},{:.3},\
+                                             {delay_ps:.4},{},{:.4},{:.4},{:.2},{:.6}",
+                                            layer0.ms, layer0.a_ex, layer0.k_u, layer0.alpha, layer0.d_dmi,
+                                            m.freq_ghz, m.freq_width_ghz, m.q_factor,
+                                            m.decay_time_ns, m.final_value, m.late_amplitude,
+                                            m.dt_sample_ps,
+                                            outcome.pulse_count,
+                                            outcome.first_pulse_t_ps,
+                                            outcome.total_fluence_mj_cm2,
+                                            outcome.max_t_e_k,
+                                            outcome.min_m_reduced,
+                                        )?;
+                                        out.flush()?;
+                                        eprintln!(
+                                            "[{idx}/{total}] {stack_desc}+{s_name} Δ={delay_ps:.2}ps \
+                                             → f={:.2}GHz Q={:.1} |m|_min={:.3} ({:.1}s)",
+                                            m.freq_ghz, m.q_factor, outcome.min_m_reduced, dt_pt,
+                                        );
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[{idx}/{total}] {stack_desc}+{s_name} Δ={delay_ps:.2}ps FAILED: {e}");
+                                    }
+                                }
                             }
-                            Err(e) => {
-                                eprintln!("[{idx}/{total}] {stack_desc}+{s_name} FAILED: {e}");
+                        } else {
+                            let t0 = Instant::now();
+                            let result = run_design_point(&config, &args);
+                            let dt_pt = t0.elapsed().as_secs_f64();
+
+                            match result {
+                                Ok(m) => {
+                                    writeln!(
+                                        out,
+                                        "{m_col},{s_name},{t_col:.3},{n_layers},\"{stack_desc}\",\
+                                         {:.4e},{:.4e},{:.4e},{:.5},{:.4e},{bz},{jx:.3e},\
+                                         {:.4},{:.4},{:.3e},{:.4e},{:.6},{:.4e},{:.3},\
+                                         ,0,0,0,0,0",
+                                        layer0.ms, layer0.a_ex, layer0.k_u, layer0.alpha, layer0.d_dmi,
+                                        m.freq_ghz, m.freq_width_ghz, m.q_factor,
+                                        m.decay_time_ns, m.final_value, m.late_amplitude,
+                                        m.dt_sample_ps,
+                                    )?;
+                                    out.flush()?;
+                                    eprintln!(
+                                        "[{idx}/{total}] {stack_desc}+{s_name} Bz={bz:.2} Jx={jx:.1e} \
+                                         → f={:.2}GHz Q={:.1} τ={:.2}ns  ({:.1}s)",
+                                        m.freq_ghz, m.q_factor, m.decay_time_ns, dt_pt,
+                                    );
+                                }
+                                Err(e) => {
+                                    eprintln!("[{idx}/{total}] {stack_desc}+{s_name} FAILED: {e}");
+                                }
                             }
                         }
                     }
