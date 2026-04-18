@@ -2,10 +2,28 @@ use std::time::Instant;
 
 use minifb::{Key, KeyRepeat, Window, WindowOptions};
 
-use magnonic_clock_sim::config::SimConfig;
+use magnonic_clock_sim::config::{Layer, SimConfig};
 use magnonic_clock_sim::gpu::GpuSolver;
 use magnonic_clock_sim::material::BulkMaterial;
 use magnonic_clock_sim::substrate::Substrate;
+
+fn parse_stack(spec: &str) -> Result<Vec<Layer>, String> {
+    spec.split(',').map(|entry| {
+        let parts: Vec<&str> = entry.trim().split(':').collect();
+        if parts.len() != 2 {
+            return Err(format!("Bad layer spec '{entry}'"));
+        }
+        let name = parts[0].trim();
+        let thickness_nm: f64 = parts[1].trim().parse().map_err(|e| format!("{e}"))?;
+        let material = BulkMaterial::lookup(name)
+            .ok_or_else(|| format!("Unknown material '{name}'"))?;
+        Ok(Layer { material, thickness: thickness_nm * 1e-9, u_axis: [0.0, 0.0, 1.0] })
+    }).collect()
+}
+
+fn parse_f64_list(s: &str) -> Result<Vec<f64>, String> {
+    s.split(',').map(|x| x.trim().parse().map_err(|e| format!("{e}"))).collect()
+}
 
 const PLOT_HEIGHT: usize = 200;
 const LABEL_HEIGHT: usize = 14;
@@ -22,12 +40,12 @@ fn main() {
             "--ny" => { config.geometry.ny = args[i + 1].parse().unwrap(); i += 2; }
             "--thickness" => {
                 let nm: f64 = args[i + 1].parse().unwrap();
-                config.geometry.thickness = nm * 1e-9;
+                config.stack.layers[0].thickness = nm * 1e-9;
                 i += 2;
             }
             "--material" => {
                 if let Some(m) = BulkMaterial::lookup(&args[i + 1]) {
-                    config.bulk = m;
+                    config.stack.layers[0].material = m;
                 } else {
                     eprintln!("Unknown material: {}", args[i + 1]);
                     std::process::exit(1);
@@ -43,7 +61,37 @@ fn main() {
                 }
                 i += 2;
             }
-            "--alpha" => { config.bulk.alpha_bulk = args[i + 1].parse().unwrap(); i += 2; }
+            "--stack" => {
+                match parse_stack(&args[i + 1]) {
+                    Ok(layers) => {
+                        let n_interfaces = layers.len().saturating_sub(1);
+                        config.stack.layers = layers;
+                        config.stack.interlayer_a.resize(n_interfaces, 0.0);
+                        config.stack.layer_spacing.resize(n_interfaces, 0.7e-9);
+                    }
+                    Err(e) => { eprintln!("--stack error: {e}"); std::process::exit(1); }
+                }
+                i += 2;
+            }
+            "--interlayer-a" => {
+                match parse_f64_list(&args[i + 1]) {
+                    Ok(v) => { config.stack.interlayer_a = v; }
+                    Err(e) => { eprintln!("--interlayer-a error: {e}"); std::process::exit(1); }
+                }
+                i += 2;
+            }
+            "--layer-spacing" => {
+                match parse_f64_list(&args[i + 1]) {
+                    Ok(v) => { config.stack.layer_spacing = v.iter().map(|nm| nm * 1e-9).collect(); }
+                    Err(e) => { eprintln!("--layer-spacing error: {e}"); std::process::exit(1); }
+                }
+                i += 2;
+            }
+            "--probe-layer" => {
+                config.probe_layer = Some(args[i + 1].parse().unwrap());
+                i += 2;
+            }
+            "--alpha" => { config.stack.layers[0].material.alpha_bulk = args[i + 1].parse().unwrap(); i += 2; }
             "--bz" => { config.b_ext[2] = args[i + 1].parse().unwrap(); i += 2; }
             "--dt" => { config.dt = args[i + 1].parse().unwrap(); i += 2; }
             _ => { i += 1; }
@@ -74,9 +122,11 @@ fn main() {
     let mut framebuf = vec![0x1a1a1au32; win_w * win_h];
     let mut running = false;
     let mut steps_per_frame: usize = 100;
+    let mut display_layer: u32 = 0;        // Which layer's heatmap to show
+    let nz = config.nz();
 
     // Live parameters
-    let mut alpha = config.effective().alpha as f32;
+    let mut alpha = config.effective().layers[0].alpha as f32;
     let mut b_ext_x = 0.0f32;
     let mut b_ext_z = config.b_ext[2] as f32;
 
@@ -108,6 +158,8 @@ fn main() {
     eprintln!("║  D         Reset: stripe domains          ║");
     eprintln!("║  U         Reset: uniform +z              ║");
     eprintln!("║  S         Reset: Néel skyrmion seed      ║");
+    eprintln!("║  K         Reset: alternating ±z (syn-AFM)║");
+    eprintln!("║  1/2/3/4   Cycle displayed layer (Nz>1)   ║");
     eprintln!("║  C         Clear plot history             ║");
     eprintln!("║  Escape    Quit                           ║");
     eprintln!("╚══════════════════════════════════════════╝");
@@ -195,12 +247,29 @@ fn main() {
             mag_data = solver.readback_mag();
             eprintln!("RESET: Néel skyrmion seed, R ≈ {r_nm:.1} nm");
         }
+        if window.is_key_pressed(Key::K, KeyRepeat::No) {
+            solver.reset_uniform_z_alternating();
+            mag_data = solver.readback_mag();
+            eprintln!("RESET: alternating +z/-z per layer (synthetic AFM)");
+        }
         if window.is_key_pressed(Key::C, KeyRepeat::No) {
             mz_hist.clear();
             mx_hist.clear();
             my_hist.clear();
             probe_hist.clear();
             eprintln!("CLEAR: plot history");
+        }
+        // Layer cycling — keys 1..4 select which layer's heatmap is shown
+        for (key, layer) in [
+            (Key::Key1, 0u32),
+            (Key::Key2, 1u32),
+            (Key::Key3, 2u32),
+            (Key::Key4, 3u32),
+        ] {
+            if window.is_key_pressed(key, KeyRepeat::No) && layer < nz {
+                display_layer = layer;
+                eprintln!("DISPLAY: layer {display_layer} / {nz}");
+            }
         }
 
         // ── Pulse countdown ────────────────────────────────────
@@ -236,15 +305,20 @@ fn main() {
                 String::new()
             };
 
+            let layer_tag = if nz > 1 {
+                format!(" | Layer {}/{}", display_layer, nz)
+            } else {
+                String::new()
+            };
             window.set_title(&format!(
-                "Step {} | {:.1}ps | Mz={:.4} | probe={:.4} | α={:.4} | Bz={:.1}T{} | {:.0}st/s | {}/fr",
+                "Step {} | {:.1}ps | Mz={:.4} | probe={:.4} | α={:.4} | Bz={:.1}T{}{} | {:.0}st/s | {}/fr",
                 obs.step, obs.time_ps, obs.avg_mz, obs.probe_mz,
-                alpha, b_ext_z, pulse_tag, steps_per_sec, steps_per_frame,
+                alpha, b_ext_z, pulse_tag, layer_tag, steps_per_sec, steps_per_frame,
             ));
         }
 
         // ── Render ─────────────────────────────────────────────
-        draw_heatmap(&mut framebuf, &mag_data, nx, ny, win_w);
+        draw_heatmap(&mut framebuf, &mag_data, nx, ny, win_w, display_layer as usize);
         draw_label_bar(&mut framebuf, win_w, ny, LABEL_HEIGHT, pulse_frames_left > 0);
         draw_plot_strip(
             &mut framebuf, win_w, ny + LABEL_HEIGHT, PLOT_HEIGHT,
@@ -262,10 +336,11 @@ fn push_trim(v: &mut Vec<f32>, val: f32, max: usize) {
 
 // ─── Rendering ─────────────────────────────────────────────────
 
-fn draw_heatmap(buf: &mut [u32], mag: &[f32], nx: usize, ny: usize, stride: usize) {
+fn draw_heatmap(buf: &mut [u32], mag: &[f32], nx: usize, ny: usize, stride: usize, display_layer: usize) {
+    let layer_offset = display_layer * nx * ny;
     for iy in 0..ny {
         for ix in 0..nx {
-            let cell = ix * ny + iy;
+            let cell = layer_offset + ix * ny + iy;
             let mz = mag[cell * 4 + 2];
             buf[iy * stride + ix] = mz_to_rgb(mz);
         }

@@ -11,135 +11,187 @@
 //
 //     B_eff [T] = μ₀ · H_eff [A/m]     (μ₀ = 4π × 10⁻⁷ T·m/A)
 //
-// Material parameters (A, Ms, K_u) are the underlying physics constants
-// in SI units, so there is no ambiguity when providing those directly.
 // The prefactor formulas below use the B-form derivations:
 //
-//     B_exch = (2A / Ms) · ∇²m         [T]   (not 2A/(μ₀·Ms))
-//     B_anis = (2K_u / Ms) · (m·û)·û    [T]   (not 2K_u/(μ₀·Ms))
-//     B_zee  = B_ext                   [T]   (user supplies Tesla)
-//
-// If you have an "H_exch coefficient" from an OOMMF-style document,
-// multiply by μ₀ before using it here.
+//     B_exch = (2A / Ms) · ∇²m         [T]
+//     B_anis = (2K_u / Ms) · (m·û)·û    [T]
+//     B_zee  = B_ext                   [T]
 // ────────────────────────────────────────────────────────────────────
 
-use crate::effective::EffectiveParams;
+use crate::effective::EffectiveParams3D;
 use crate::material::BulkMaterial;
 use crate::substrate::Substrate;
 
-/// Simulation geometry: film thickness, cell size, grid dimensions.
+/// A single layer in a magnetic stack.
 ///
-/// `thickness` is critical — it scales the surface-density substrate
-/// contributions (K_u_surface, D_DMI_surface) to volume-density effective
-/// parameters. A monolayer (~0.7 nm) amplifies interface effects ~10×
-/// compared to a 10-layer flake (~7 nm).
+/// Each layer carries its own bulk material, thickness, and anisotropy axis.
+/// Heterostructures (e.g., YIG/FGT) are represented as a Stack of distinct
+/// Layers.
+#[derive(Clone, Debug)]
+pub struct Layer {
+    pub material: BulkMaterial,
+    /// Layer thickness [m]
+    pub thickness: f64,
+    /// Anisotropy axis (unit vector, normalized on GPU upload)
+    pub u_axis: [f64; 3],
+}
+
+/// Ordered stack of magnetic layers, bottom → top.
+///
+/// `layers[0]` is the bottom layer, in contact with the substrate.
+/// `interlayer_a[i]` is the exchange-coupling constant [J/m] at the
+/// interface between layers i and i+1. `layer_spacing[i]` is the effective
+/// z-distance between the centers of layers i and i+1 [m].
+///
+/// In Phase M1 the interlayer fields are stored but not yet used by the
+/// shader — each layer evolves independently. Phase M2 activates them.
+#[derive(Clone, Debug)]
+pub struct Stack {
+    pub layers: Vec<Layer>,
+    pub interlayer_a: Vec<f64>,
+    pub layer_spacing: Vec<f64>,
+}
+
+impl Stack {
+    /// Maximum number of layers supported by the GPU shader (array size cap).
+    pub const MAX_LAYERS: usize = 4;
+
+    /// Single-layer stack — reproduces pre-multilayer behavior.
+    pub fn monolayer(material: BulkMaterial, thickness: f64, u_axis: [f64; 3]) -> Self {
+        Self {
+            layers: vec![Layer { material, thickness, u_axis }],
+            interlayer_a: Vec::new(),
+            layer_spacing: Vec::new(),
+        }
+    }
+
+    pub fn nz(&self) -> u32 {
+        self.layers.len() as u32
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.layers.is_empty() {
+            return Err("Stack has no layers".to_string());
+        }
+        if self.layers.len() > Self::MAX_LAYERS {
+            return Err(format!(
+                "Stack has {} layers; MAX_LAYERS = {}",
+                self.layers.len(), Self::MAX_LAYERS
+            ));
+        }
+        let expected_interfaces = self.layers.len().saturating_sub(1);
+        if self.interlayer_a.len() != expected_interfaces {
+            return Err(format!(
+                "interlayer_a has length {}, expected {}",
+                self.interlayer_a.len(), expected_interfaces
+            ));
+        }
+        if self.layer_spacing.len() != expected_interfaces {
+            return Err(format!(
+                "layer_spacing has length {}, expected {}",
+                self.layer_spacing.len(), expected_interfaces
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// In-plane geometry and grid resolution. Layer thicknesses and Nz live on
+/// the Stack; this struct only carries what all layers share.
 #[derive(Clone, Debug)]
 pub struct Geometry {
-    /// Film thickness [m]
-    pub thickness: f64,
-    /// In-plane cell size [m] — assumed isotropic (dx = dy)
-    pub cell_size: f64,
     pub nx: u32,
     pub ny: u32,
+    /// In-plane cell size [m] — assumed isotropic (dx = dy)
+    pub cell_size: f64,
 }
 
 impl Geometry {
-    /// Thin 2D monolayer-scale geometry, default cell size ~ FGT exchange length.
+    /// Default in-plane geometry matching the pre-multilayer default
+    /// (cell size ≈ FGT exchange length).
     pub fn thin_2d(nx: u32, ny: u32) -> Self {
-        Self {
-            thickness: 0.7e-9,
-            cell_size: 2.5e-9,
-            nx,
-            ny,
-        }
+        Self { nx, ny, cell_size: 2.5e-9 }
     }
 }
 
 /// Full simulation configuration.
 #[derive(Clone)]
 pub struct SimConfig {
-    /// Bulk material (intrinsic, substrate-independent properties)
-    pub bulk: BulkMaterial,
-    /// Substrate (contributes interface + coupling effects)
+    /// Magnetic stack (≥ 1 layer)
+    pub stack: Stack,
+    /// Substrate below layer 0 (top of stack is always free / vacuum)
     pub substrate: Substrate,
-    /// Geometry (thickness, cell size, grid dimensions)
     pub geometry: Geometry,
 
     /// Timestep [s]
     pub dt: f64,
-    /// External magnetic field [T]
+    /// External magnetic field [T] (global, applies to all layers)
     pub b_ext: [f64; 3],
-    /// Uniaxial anisotropy axis (normalized before GPU upload)
-    pub u_axis: [f64; 3],
     /// Pitchfork stabilization coefficient [1/s] — dormant (see llg.wgsl)
     pub stab_coeff: f64,
-    /// Charge current density [A/m²], flowing in the substrate plane.
-    /// σ = ẑ × ĵ_c sets the spin polarization direction for SOT (Phase 4).
+    /// Charge current density [A/m²] through the substrate (SOT drive of layer 0)
     pub j_current: [f64; 3],
 
     pub readback_interval: usize,
     pub total_steps: usize,
+    /// In-plane probe index (default: center of grid)
     pub probe_idx: Option<u32>,
+    /// Which layer to probe. Default: 0 (bottom)
+    pub probe_layer: Option<u32>,
 }
 
 impl SimConfig {
-    /// Default FGT: bulk single-crystal parameters (Leon-Brito 2016) on
-    /// a vacuum substrate — a physically honest "isolated FGT monolayer"
-    /// baseline. Previously this used Garland 2026 effective values, which
-    /// silently baked in substrate effects; see docs/plan.md §0.
-    /// For the legacy Garland-effective regime, use BulkMaterial::fgt_effective().
+    /// Default FGT single-layer (bulk) on vacuum — preserves pre-M1 behavior.
     pub fn fgt_default(nx: u32, ny: u32) -> Self {
         Self {
-            bulk: BulkMaterial::fgt_bulk(),
+            stack: Stack::monolayer(
+                BulkMaterial::fgt_bulk(),
+                0.7e-9,
+                [0.0, 0.0, 1.0],
+            ),
             substrate: Substrate::vacuum(),
             geometry: Geometry::thin_2d(nx, ny),
-            dt: 1.0e-13,
+            // dt must satisfy dt·γ·B_max << 1 for Heun stability.
+            // fgt-bulk has B_anis ≈ 7.77 T → dt·γ·B ≈ 0.14 at dt=1e-13 (unstable).
+            // At dt=1e-14 we have ≈ 0.014, safely in the stable regime.
+            dt: 1.0e-14,
             b_ext: [0.0, 0.0, 0.0],
-            u_axis: [0.0, 0.0, 1.0],
             stab_coeff: 1.0e11,
             j_current: [0.0, 0.0, 0.0],
             readback_interval: 100,
             total_steps: 10_000,
             probe_idx: None,
+            probe_layer: None,
         }
     }
 
-    /// Compute the effective parameters that the GPU sees.
-    pub fn effective(&self) -> EffectiveParams {
-        EffectiveParams::from_parts(&self.bulk, &self.substrate, &self.geometry)
+    pub fn effective(&self) -> EffectiveParams3D {
+        EffectiveParams3D::from_parts(&self.stack, &self.substrate, &self.geometry)
     }
 
     pub fn nx(&self) -> u32 { self.geometry.nx }
     pub fn ny(&self) -> u32 { self.geometry.ny }
+    pub fn nz(&self) -> u32 { self.stack.nz() }
     pub fn cell_size(&self) -> f64 { self.geometry.cell_size }
-
-    /// Convenience: exchange-field prefactor for the Laplacian stencil.
-    pub fn exchange_prefactor(&self) -> f64 {
-        self.effective().exchange_prefactor(self.geometry.cell_size)
-    }
-
-    /// Convenience: anisotropy-field prefactor.
-    pub fn anisotropy_prefactor(&self) -> f64 {
-        self.effective().anisotropy_prefactor()
-    }
+    pub fn cell_count(&self) -> u32 { self.nx() * self.ny() * self.nz() }
 
     pub fn print_summary(&self) {
         let eff = self.effective();
         eprintln!("=== Magnonic Clock Simulator ===");
-        eprintln!("Material : {}", self.bulk.name);
-        eprintln!("Substrate: {}", self.substrate.name);
-        eprintln!("Geometry : {}×{}, cell {:.2} nm, thickness {:.2} nm",
-                  self.geometry.nx, self.geometry.ny,
-                  self.geometry.cell_size * 1e9,
-                  self.geometry.thickness * 1e9);
+        eprintln!("Stack: {} layer(s)", self.stack.layers.len());
+        for (i, layer) in self.stack.layers.iter().enumerate() {
+            eprintln!("  [{}] {} @ {:.2} nm, u_axis=({:.2},{:.2},{:.2})",
+                      i, layer.material.name, layer.thickness * 1e9,
+                      layer.u_axis[0], layer.u_axis[1], layer.u_axis[2]);
+        }
+        eprintln!("Substrate (bottom interface): {}", self.substrate.name);
+        eprintln!("Geometry : {}×{}×{}, cell {:.2} nm",
+                  self.nx(), self.ny(), self.nz(), self.cell_size() * 1e9);
         eprintln!("Domain   : {:.1} × {:.1} nm",
-                  self.geometry.nx as f64 * self.geometry.cell_size * 1e9,
-                  self.geometry.ny as f64 * self.geometry.cell_size * 1e9);
+                  self.nx() as f64 * self.cell_size() * 1e9,
+                  self.ny() as f64 * self.cell_size() * 1e9);
         eprintln!("Timestep : {:.2} ps", self.dt * 1e12);
-        eff.print_decomposition(&self.bulk, &self.substrate, &self.geometry);
-        eprintln!("Prefactors: B_exch={:.3} T, B_anis={:.3} T",
-                  eff.exchange_prefactor(self.geometry.cell_size),
-                  eff.anisotropy_prefactor());
+        eff.print_decomposition(&self.stack, &self.substrate, &self.geometry);
         eprintln!("B_ext    : ({:.3}, {:.3}, {:.3}) T",
                   self.b_ext[0], self.b_ext[1], self.b_ext[2]);
         eprintln!("================================");

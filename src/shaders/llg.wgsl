@@ -1,79 +1,56 @@
-// Magnonic Clock Simulator — LLG Compute Kernels
+// Magnonic Clock Simulator — LLG Compute Kernels (Multilayer, Phase M1)
 //
 // Integrator: PROJECTED HEUN (explicit trapezoidal + post-stage renormalize).
-//   Not plain textbook Heun — we renormalize |m|=1 after both the predictor
-//   and corrector. This is standard practice in micromagnetics (MuMax3,
-//   OOMMF) because explicit discretizations of LLG do not preserve |m|=1
-//   in discrete time, and projection is a simple, stable remedy.
+// See notes in earlier 2D version; the scheme is unchanged.
 //
-//   An alternative (the 2025 Peiris stabilization term) is retained as the
-//   dormant `stab_coeff` uniform for future experimentation with a
-//   smooth-correction approach. In the current code path it has no effect.
+// Geometry:
+//   3D grid Nx × Ny × Nz, flat index:
+//     idx = iz * (Nx * Ny) + ix * Ny + iy
+//   Layers are ordered bottom → top; layer 0 carries substrate contributions.
 //
-// Field convention: B_eff in Tesla (not H in A/m). See config.rs for
-// the unit convention block and conversion formulas.
+// Phase M2 status: interlayer exchange is ACTIVE. Each cell at (ix, iy, iz)
+// couples to the same (ix, iy) cell in the layers immediately above and
+// below, weighted by per-layer prefactors `layer_ilx_above[iz]` and
+// `layer_ilx_below[iz]`. At the top/bottom of the stack the missing
+// neighbor is absent (clamping Neumann BC — contribution is zero).
 //
-// Assumed geometry: square 2D cells with isotropic in-plane spacing dx = dy.
-// Exchange stencil uses one prefactor for both directions; rectangular
-// cells would require direction-dependent prefactors.
+// Per-layer params are indexed by iz. Max 4 layers (MAX_LAYERS = 4).
 //
-// Buffer layout: 4 × f32 per cell (mx, my, mz, pad)
-// Grid: row-major 2D, idx = ix * ny + iy
-//
-// h_eff buffer semantics: STAGE SCRATCH, NOT OBSERVABLE STATE.
-//   Phase 0 writes B_eff(mag); phase 1 overwrites with B_eff(mag_pred).
-//   After heun_correct, h_eff reflects the predicted (mid-step) field, NOT
-//   the field of the final corrected magnetization. Do not read h_eff as
-//   the instantaneous field of the current state; add a final field
-//   recompute pass if you need that diagnostic.
+// h_eff buffer semantics: STAGE SCRATCH (unchanged).
 
 struct Params {
     nx: u32,
     ny: u32,
+    nz: u32,
     cell_count: u32,
-    _pad_grid: u32,
 
-    dt: f32,             // timestep [s]
-    gamma: f32,          // gyromagnetic ratio [rad/(s·T)]
-    alpha: f32,          // Gilbert damping
-    stab_coeff: f32,     // pitchfork stabilization [1/s]
+    dt: f32,
+    gamma: f32,
+    stab_coeff: f32,
+    _pad_dyn: f32,
 
-    exchange_pf: f32,    // 2A/(Ms·dx²) [T]
-    anisotropy_pf: f32,  // 2K_u/Ms [T]
-    _pad_mat0: f32,
-    _pad_mat1: f32,
+    b_ext: vec4<f32>,
 
-    u_axis_x: f32,
-    u_axis_y: f32,
-    u_axis_z: f32,
-    _pad_axis: f32,
+    // Packed per-layer scalars (vec4 = 4 layers)
+    layer_alphas: vec4<f32>,
+    layer_exchange_pfs: vec4<f32>,
+    layer_anisotropy_pfs: vec4<f32>,
+    layer_dmi_pfs: vec4<f32>,
+    layer_sot_tau_dls: vec4<f32>,
+    layer_sot_tau_fls: vec4<f32>,
+    layer_thicknesses: vec4<f32>,
 
-    b_ext_x: f32,
-    b_ext_y: f32,
-    b_ext_z: f32,
-    _pad_ext: f32,
+    // Per-layer interlayer-exchange prefactors (Phase M2 — active)
+    //   layer_ilx_below[k]: prefactor for layer k reading interface BELOW it
+    //   layer_ilx_above[k]: prefactor for layer k reading interface ABOVE it
+    // Asymmetric across heterostructure interfaces (Ms_k ≠ Ms_{k-1}).
+    layer_ilx_below: vec4<f32>,
+    layer_ilx_above: vec4<f32>,
 
-    // Exchange bias from AFM substrate (Phase 2)
-    b_bias_x: f32,
-    b_bias_y: f32,
-    b_bias_z: f32,
-    _pad_bias: f32,
-
-    // Interfacial (Rashba) DMI prefactor (Phase 3): D / (Ms·dx) [T per unit neighbor difference]
-    dmi_pf: f32,
-    _pad_dmi0: f32,
-    _pad_dmi1: f32,
-    _pad_dmi2: f32,
-
-    // Slonczewski SOT (Phase 4): current-driven torque from heavy-metal substrate
-    sot_tau_dl: f32,      // damping-like torque effective field [T]
-    sot_tau_fl: f32,      // field-like torque effective field [T]
-    _pad_sot0: f32,
-    _pad_sot1: f32,
-    sigma_x: f32,         // spin polarization direction (unit vector)
-    sigma_y: f32,
-    sigma_z: f32,
-    _pad_sigma: f32,
+    // Per-layer vec3-in-vec4 fields (array stride 16 bytes)
+    layer_u_axes: array<vec4<f32>, 4>,
+    layer_b_biases: array<vec4<f32>, 4>,
+    layer_sigmas: array<vec4<f32>, 4>,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -83,12 +60,21 @@ struct Params {
 @group(0) @binding(4) var<storage, read_write> torque_0: array<f32>;
 @group(0) @binding(5) var<storage, read_write> torque_1: array<f32>;
 
-// ─── Helpers ───────────────────────────────────────────────────
+// ─── Index helpers ─────────────────────────────────────────────
 
-fn neighbor_idx(ix: i32, iy: i32) -> u32 {
+fn in_plane_count() -> u32 {
+    return params.nx * params.ny;
+}
+
+fn layer_of(idx: u32) -> u32 {
+    return idx / in_plane_count();
+}
+
+/// Flat 3D index for an in-plane neighbor on the same layer, with Neumann BC.
+fn neighbor_idx(iz: u32, ix: i32, iy: i32) -> u32 {
     let cx = clamp(ix, 0i, i32(params.nx) - 1i);
     let cy = clamp(iy, 0i, i32(params.ny) - 1i);
-    return u32(cx) * params.ny + u32(cy);
+    return iz * in_plane_count() + u32(cx) * params.ny + u32(cy);
 }
 
 fn read_mag(idx: u32) -> vec3<f32> {
@@ -96,8 +82,8 @@ fn read_mag(idx: u32) -> vec3<f32> {
     return vec3<f32>(mag[b], mag[b + 1u], mag[b + 2u]);
 }
 
-fn read_mag_at(ix: i32, iy: i32) -> vec3<f32> {
-    return read_mag(neighbor_idx(ix, iy));
+fn read_mag_at(iz: u32, ix: i32, iy: i32) -> vec3<f32> {
+    return read_mag(neighbor_idx(iz, ix, iy));
 }
 
 fn read_pred(idx: u32) -> vec3<f32> {
@@ -105,185 +91,204 @@ fn read_pred(idx: u32) -> vec3<f32> {
     return vec3<f32>(mag_pred[b], mag_pred[b + 1u], mag_pred[b + 2u]);
 }
 
-fn read_pred_at(ix: i32, iy: i32) -> vec3<f32> {
-    return read_pred(neighbor_idx(ix, iy));
+fn read_pred_at(iz: u32, ix: i32, iy: i32) -> vec3<f32> {
+    return read_pred(neighbor_idx(iz, ix, iy));
 }
 
-// Exchange field from mag buffer (4-neighbor Laplacian, Neumann BC)
+// ─── Per-layer field helpers ───────────────────────────────────
+
 fn exchange_from_mag(idx: u32) -> vec3<f32> {
-    let ix = i32(idx / params.ny);
-    let iy = i32(idx % params.ny);
+    let iz = layer_of(idx);
+    let in_plane_idx = idx % in_plane_count();
+    let ix = i32(in_plane_idx / params.ny);
+    let iy = i32(in_plane_idx % params.ny);
     let m_c = read_mag(idx);
-    let lap = read_mag_at(ix + 1i, iy) + read_mag_at(ix - 1i, iy)
-            + read_mag_at(ix, iy + 1i) + read_mag_at(ix, iy - 1i)
+    let lap = read_mag_at(iz, ix + 1i, iy) + read_mag_at(iz, ix - 1i, iy)
+            + read_mag_at(iz, ix, iy + 1i) + read_mag_at(iz, ix, iy - 1i)
             - 4.0 * m_c;
-    return params.exchange_pf * lap;
+    return params.layer_exchange_pfs[iz] * lap;
 }
 
-// Exchange field from mag_pred buffer
 fn exchange_from_pred(idx: u32) -> vec3<f32> {
-    let ix = i32(idx / params.ny);
-    let iy = i32(idx % params.ny);
+    let iz = layer_of(idx);
+    let in_plane_idx = idx % in_plane_count();
+    let ix = i32(in_plane_idx / params.ny);
+    let iy = i32(in_plane_idx % params.ny);
     let m_c = read_pred(idx);
-    let lap = read_pred_at(ix + 1i, iy) + read_pred_at(ix - 1i, iy)
-            + read_pred_at(ix, iy + 1i) + read_pred_at(ix, iy - 1i)
+    let lap = read_pred_at(iz, ix + 1i, iy) + read_pred_at(iz, ix - 1i, iy)
+            + read_pred_at(iz, ix, iy + 1i) + read_pred_at(iz, ix, iy - 1i)
             - 4.0 * m_c;
-    return params.exchange_pf * lap;
+    return params.layer_exchange_pfs[iz] * lap;
 }
 
-// Uniaxial anisotropy field
-fn anisotropy_field(m: vec3<f32>) -> vec3<f32> {
-    let u = vec3<f32>(params.u_axis_x, params.u_axis_y, params.u_axis_z);
-    return params.anisotropy_pf * dot(m, u) * u;
+/// Interlayer (z-direction) exchange field — M2 active.
+///
+/// For layer k at in-plane (ix, iy), the two adjacent-layer neighbors at the
+/// SAME (ix, iy) on layers k±1 contribute:
+///   B = ilx_below[k]·(m_{k-1} - m_k) + ilx_above[k]·(m_{k+1} - m_k)
+///
+/// At the stack boundaries (k=0 or k=Nz-1) the missing neighbor is absent;
+/// the corresponding prefactor is zero by construction (from Rust side).
+fn exchange_interlayer_from_mag(idx: u32) -> vec3<f32> {
+    let iz = layer_of(idx);
+    let in_plane_idx = idx % in_plane_count();
+    let m_c = read_mag(idx);
+    var result = vec3<f32>(0.0, 0.0, 0.0);
+    if iz > 0u {
+        let below_idx = (iz - 1u) * in_plane_count() + in_plane_idx;
+        let m_below = read_mag(below_idx);
+        result += params.layer_ilx_below[iz] * (m_below - m_c);
+    }
+    if iz + 1u < params.nz {
+        let above_idx = (iz + 1u) * in_plane_count() + in_plane_idx;
+        let m_above = read_mag(above_idx);
+        result += params.layer_ilx_above[iz] * (m_above - m_c);
+    }
+    return result;
 }
 
-// Uniform external (Zeeman) field
+fn exchange_interlayer_from_pred(idx: u32) -> vec3<f32> {
+    let iz = layer_of(idx);
+    let in_plane_idx = idx % in_plane_count();
+    let m_c = read_pred(idx);
+    var result = vec3<f32>(0.0, 0.0, 0.0);
+    if iz > 0u {
+        let below_idx = (iz - 1u) * in_plane_count() + in_plane_idx;
+        let m_below = read_pred(below_idx);
+        result += params.layer_ilx_below[iz] * (m_below - m_c);
+    }
+    if iz + 1u < params.nz {
+        let above_idx = (iz + 1u) * in_plane_count() + in_plane_idx;
+        let m_above = read_pred(above_idx);
+        result += params.layer_ilx_above[iz] * (m_above - m_c);
+    }
+    return result;
+}
+
+fn anisotropy_field(m: vec3<f32>, iz: u32) -> vec3<f32> {
+    let u = params.layer_u_axes[iz].xyz;
+    return params.layer_anisotropy_pfs[iz] * dot(m, u) * u;
+}
+
 fn zeeman_field() -> vec3<f32> {
-    return vec3<f32>(params.b_ext_x, params.b_ext_y, params.b_ext_z);
+    return params.b_ext.xyz;
 }
 
-// Substrate-pinned exchange bias field (Phase 2).
-// Contributed by antiferromagnetic substrates (IrMn, CoO) that pin the
-// ferromagnet via interfacial exchange coupling. Acts as an additional
-// uniform Zeeman-like term along a fixed direction set by the substrate's
-// field-cooling history.
-fn exchange_bias_field() -> vec3<f32> {
-    return vec3<f32>(params.b_bias_x, params.b_bias_y, params.b_bias_z);
+fn exchange_bias_field(iz: u32) -> vec3<f32> {
+    return params.layer_b_biases[iz].xyz;
 }
 
-// Interfacial (Rashba) DMI field (Phase 3) — from mag buffer.
-// Energy (Thiaville 2012 convention, standard in micromagnetics literature):
-//   e_DMI = D · [m_x·∂m_z/∂x + m_y·∂m_z/∂y - m_z·∂m_x/∂x - m_z·∂m_y/∂y]
-// Derived effective field (δE/δm → -B/Ms):
-//   B_DMI_x = -(2D/Ms)·∂m_z/∂x
-//   B_DMI_y = -(2D/Ms)·∂m_z/∂y
-//   B_DMI_z = +(2D/Ms)·(∂m_x/∂x + ∂m_y/∂y)
-// With this convention, positive D stabilizes OUTWARD-radial Néel skyrmions
-// (standard Pt/Co heavy-metal heterostructure chirality).
-// Central differences: ∂m/∂x ≈ (m[i+1] - m[i-1]) / (2·dx).
-// dmi_pf = D / (Ms·dx) absorbs the /(2·dx) from the stencil and the 2 from
-// the variational derivative — stencil returns raw (m[i+1] - m[i-1]).
-// Boundaries use the same clamping-Neumann treatment as exchange.
 fn dmi_from_mag(idx: u32) -> vec3<f32> {
-    let ix = i32(idx / params.ny);
-    let iy = i32(idx % params.ny);
-    let m_px = read_mag_at(ix + 1i, iy);
-    let m_mx = read_mag_at(ix - 1i, iy);
-    let m_py = read_mag_at(ix, iy + 1i);
-    let m_my = read_mag_at(ix, iy - 1i);
+    let iz = layer_of(idx);
+    let in_plane_idx = idx % in_plane_count();
+    let ix = i32(in_plane_idx / params.ny);
+    let iy = i32(in_plane_idx % params.ny);
+    let m_px = read_mag_at(iz, ix + 1i, iy);
+    let m_mx = read_mag_at(iz, ix - 1i, iy);
+    let m_py = read_mag_at(iz, ix, iy + 1i);
+    let m_my = read_mag_at(iz, ix, iy - 1i);
     let dmz_dx = m_px.z - m_mx.z;
     let dmz_dy = m_py.z - m_my.z;
     let dmx_dx = m_px.x - m_mx.x;
     let dmy_dy = m_py.y - m_my.y;
-    return params.dmi_pf * vec3<f32>(-dmz_dx, -dmz_dy, (dmx_dx + dmy_dy));
+    return params.layer_dmi_pfs[iz] * vec3<f32>(-dmz_dx, -dmz_dy, (dmx_dx + dmy_dy));
 }
 
 fn dmi_from_pred(idx: u32) -> vec3<f32> {
-    let ix = i32(idx / params.ny);
-    let iy = i32(idx % params.ny);
-    let m_px = read_pred_at(ix + 1i, iy);
-    let m_mx = read_pred_at(ix - 1i, iy);
-    let m_py = read_pred_at(ix, iy + 1i);
-    let m_my = read_pred_at(ix, iy - 1i);
+    let iz = layer_of(idx);
+    let in_plane_idx = idx % in_plane_count();
+    let ix = i32(in_plane_idx / params.ny);
+    let iy = i32(in_plane_idx % params.ny);
+    let m_px = read_pred_at(iz, ix + 1i, iy);
+    let m_mx = read_pred_at(iz, ix - 1i, iy);
+    let m_py = read_pred_at(iz, ix, iy + 1i);
+    let m_my = read_pred_at(iz, ix, iy - 1i);
     let dmz_dx = m_px.z - m_mx.z;
     let dmz_dy = m_py.z - m_my.z;
     let dmx_dx = m_px.x - m_mx.x;
     let dmy_dy = m_py.y - m_my.y;
-    return params.dmi_pf * vec3<f32>(-dmz_dx, -dmz_dy, (dmx_dx + dmy_dy));
+    return params.layer_dmi_pfs[iz] * vec3<f32>(-dmz_dx, -dmz_dy, (dmx_dx + dmy_dy));
 }
 
-// LLG torque in Landau-Lifshitz form with Slonczewski SOT (Phase 4):
-//   dm/dt = -γ'[(m × B) + α(m × (m × B))]
-//         - γ [τ_DL·m × (m × σ) + τ_FL·(m × σ)]
-// where γ' = γ/(1+α²). First line is the standard LLG precession + Gilbert
-// damping. Second line is spin-orbit torque: σ is the spin polarization
-// direction set by the charge current in the substrate (σ = ẑ × ĵ_c);
-// τ_DL is the damping-like effective field, τ_FL the field-like.
-//
-// SOT vanishes when τ_DL and τ_FL are zero (no current), reducing to pure LLG.
-// |m| is preserved by post-step normalize in heun_predict/heun_correct.
-fn llg_torque(m: vec3<f32>, b_eff: vec3<f32>) -> vec3<f32> {
-    let a2 = params.alpha * params.alpha;
+/// LLG torque + Slonczewski SOT (both per-layer).
+fn llg_torque(m: vec3<f32>, b_eff: vec3<f32>, iz: u32) -> vec3<f32> {
+    let alpha = params.layer_alphas[iz];
+    let a2 = alpha * alpha;
     let gp = params.gamma / (1.0 + a2);
 
     let mxb = cross(m, b_eff);
     let mxmxb = cross(m, mxb);
 
-    var dmdt = -gp * (mxb + params.alpha * mxmxb);
+    var dmdt = -gp * (mxb + alpha * mxmxb);
 
-    // SOT contribution (Slonczewski form)
-    let sigma = vec3<f32>(params.sigma_x, params.sigma_y, params.sigma_z);
+    // SOT (only nonzero for layer 0 by current convention)
+    let sigma = params.layer_sigmas[iz].xyz;
     let mxs = cross(m, sigma);
     let mxmxs = cross(m, mxs);
-    dmdt += -params.gamma * (params.sot_tau_dl * mxmxs + params.sot_tau_fl * mxs);
+    dmdt += -params.gamma * (params.layer_sot_tau_dls[iz] * mxmxs
+                            + params.layer_sot_tau_fls[iz] * mxs);
 
     return dmdt;
 }
 
 // ─── Entry points ──────────────────────────────────────────────
 
-// Phase 0: compute effective field from mag, LLG torque → torque_0
 @compute @workgroup_size(64)
 fn field_torque_phase0(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x;
     if idx >= params.cell_count { return; }
+    let iz = layer_of(idx);
 
     let m = read_mag(idx);
-    let b_eff = exchange_from_mag(idx) + anisotropy_field(m)
-              + zeeman_field() + exchange_bias_field() + dmi_from_mag(idx);
-    let t = llg_torque(m, b_eff);
+    let b_eff = exchange_from_mag(idx) + exchange_interlayer_from_mag(idx)
+              + anisotropy_field(m, iz) + zeeman_field()
+              + exchange_bias_field(iz) + dmi_from_mag(idx);
+    let t = llg_torque(m, b_eff, iz);
 
     let base = idx * 4u;
     h_eff[base] = b_eff.x; h_eff[base + 1u] = b_eff.y; h_eff[base + 2u] = b_eff.z;
     torque_0[base] = t.x; torque_0[base + 1u] = t.y; torque_0[base + 2u] = t.z;
 }
 
-// Phase 1: compute effective field from mag_pred, LLG torque → torque_1
 @compute @workgroup_size(64)
 fn field_torque_phase1(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x;
     if idx >= params.cell_count { return; }
+    let iz = layer_of(idx);
 
     let m = read_pred(idx);
-    let b_eff = exchange_from_pred(idx) + anisotropy_field(m)
-              + zeeman_field() + exchange_bias_field() + dmi_from_pred(idx);
-    let t = llg_torque(m, b_eff);
+    let b_eff = exchange_from_pred(idx) + exchange_interlayer_from_pred(idx)
+              + anisotropy_field(m, iz) + zeeman_field()
+              + exchange_bias_field(iz) + dmi_from_pred(idx);
+    let t = llg_torque(m, b_eff, iz);
 
     let base = idx * 4u;
     h_eff[base] = b_eff.x; h_eff[base + 1u] = b_eff.y; h_eff[base + 2u] = b_eff.z;
     torque_1[base] = t.x; torque_1[base + 1u] = t.y; torque_1[base + 2u] = t.z;
 }
 
-// Heun predictor: m* = normalize(m + dt · T₀)
 @compute @workgroup_size(64)
 fn heun_predict(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x;
     if idx >= params.cell_count { return; }
-
     let b = idx * 4u;
     let m = vec3<f32>(mag[b], mag[b + 1u], mag[b + 2u]);
     let t0 = vec3<f32>(torque_0[b], torque_0[b + 1u], torque_0[b + 2u]);
-
     let m_star = normalize(m + params.dt * t0);
-
     mag_pred[b] = m_star.x;
     mag_pred[b + 1u] = m_star.y;
     mag_pred[b + 2u] = m_star.z;
 }
 
-// Heun corrector: m_{n+1} = normalize(m + dt/2 · (T₀ + T₁))
 @compute @workgroup_size(64)
 fn heun_correct(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x;
     if idx >= params.cell_count { return; }
-
     let b = idx * 4u;
     let m = vec3<f32>(mag[b], mag[b + 1u], mag[b + 2u]);
     let t0 = vec3<f32>(torque_0[b], torque_0[b + 1u], torque_0[b + 2u]);
     let t1 = vec3<f32>(torque_1[b], torque_1[b + 1u], torque_1[b + 2u]);
-
     let m_new = normalize(m + 0.5 * params.dt * (t0 + t1));
-
     mag[b] = m_new.x;
     mag[b + 1u] = m_new.y;
     mag[b + 2u] = m_new.z;

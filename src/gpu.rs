@@ -2,9 +2,18 @@ use std::sync::Arc;
 
 use wgpu::util::DeviceExt;
 
-use crate::config::SimConfig;
+use crate::config::{SimConfig, Stack};
 
 // ─── GPU-side parameter struct (must match WGSL Params exactly) ────
+//
+// Layout strategy (multilayer, M1):
+//   - Globals first (grid, dt, γ, stab_coeff, B_ext)
+//   - Per-layer scalar params packed into vec4 (4 layers per vec4 slot)
+//   - Per-layer vec3 params stored as arrays of vec4 (16-byte stride)
+// MAX_LAYERS = 4 sets the array sizes. Layers beyond the stack's layer
+// count are zeroed and ignored by the shader (which iterates iz < nz).
+
+const MAX_LAYERS: usize = Stack::MAX_LAYERS;
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -12,114 +21,126 @@ struct GpuParams {
     // 0-15: grid
     nx: u32,
     ny: u32,
+    nz: u32,
     cell_count: u32,
-    _pad_grid: u32,
 
-    // 16-31: time/dynamics
+    // 16-31: dynamics
     dt: f32,
     gamma: f32,
-    alpha: f32,
     stab_coeff: f32,
+    _pad_dyn: f32,
 
-    // 32-47: material prefactors
-    exchange_pf: f32,
-    anisotropy_pf: f32,
-    _pad_mat0: f32,
-    _pad_mat1: f32,
+    // 32-47: B_ext (global Zeeman, applies to all layers)
+    b_ext: [f32; 4],
 
-    // 48-63: anisotropy axis
-    u_axis_x: f32,
-    u_axis_y: f32,
-    u_axis_z: f32,
-    _pad_axis: f32,
+    // 48-63: packed per-layer α                           (vec4 — 4 layers)
+    layer_alphas: [f32; 4],
+    // 64-79: packed per-layer in-plane exchange prefactor (vec4)
+    layer_exchange_pfs: [f32; 4],
+    // 80-95: packed per-layer anisotropy prefactor
+    layer_anisotropy_pfs: [f32; 4],
+    // 96-111: packed per-layer DMI prefactor
+    layer_dmi_pfs: [f32; 4],
+    // 112-127: packed per-layer SOT damping-like
+    layer_sot_tau_dls: [f32; 4],
+    // 128-143: packed per-layer SOT field-like
+    layer_sot_tau_fls: [f32; 4],
+    // 144-159: packed per-layer thicknesses [m]
+    layer_thicknesses: [f32; 4],
+    // 160-175: packed per-layer interlayer-exchange prefactor for interface BELOW
+    //          (zero for layer 0). See effective.rs:interlayer_prefactor_below.
+    layer_ilx_below: [f32; 4],
+    // 176-191: packed per-layer interlayer-exchange prefactor for interface ABOVE
+    //          (zero for layer Nz-1).
+    layer_ilx_above: [f32; 4],
 
-    // 64-79: external field (Zeeman)
-    b_ext_x: f32,
-    b_ext_y: f32,
-    b_ext_z: f32,
-    _pad_ext: f32,
-
-    // 80-95: exchange bias (Phase 2 — substrate-pinned effective field)
-    b_bias_x: f32,
-    b_bias_y: f32,
-    b_bias_z: f32,
-    _pad_bias: f32,
-
-    // 96-111: interfacial DMI (Phase 3 — Rashba-type from broken symmetry)
-    dmi_pf: f32,
-    _pad_dmi0: f32,
-    _pad_dmi1: f32,
-    _pad_dmi2: f32,
-
-    // 112-127: SOT torque strengths (Phase 4 — current-driven Slonczewski)
-    sot_tau_dl: f32,
-    sot_tau_fl: f32,
-    _pad_sot0: f32,
-    _pad_sot1: f32,
-
-    // 128-143: SOT spin polarization direction σ = ẑ × ĵ_c (unit vector)
-    sigma_x: f32,
-    sigma_y: f32,
-    sigma_z: f32,
-    _pad_sigma: f32,
+    // 192-255: per-layer anisotropy axes (4 × vec4, xyz+pad)
+    layer_u_axes: [[f32; 4]; MAX_LAYERS],
+    // 256-319: per-layer B_bias (4 × vec4)
+    layer_b_biases: [[f32; 4]; MAX_LAYERS],
+    // 320-383: per-layer SOT σ direction (4 × vec4)
+    layer_sigmas: [[f32; 4]; MAX_LAYERS],
 }
 
 impl GpuParams {
     fn from_config(cfg: &SimConfig) -> Self {
         let eff = cfg.effective();
-        let (sot_tau_dl, sot_tau_fl, sigma) =
-            eff.sot_coefficients(cfg.j_current, cfg.geometry.thickness);
+        let nz = cfg.nz() as usize;
+        assert!(nz <= MAX_LAYERS, "Stack has {} layers; MAX_LAYERS = {}", nz, MAX_LAYERS);
 
-        // Enforce unit anisotropy axis — the shader applies it directly
-        // as û in (m·û)û without normalizing. A non-unit axis would
-        // silently rescale the anisotropy strength.
-        let [ux, uy, uz] = cfg.u_axis;
-        let u_norm = (ux * ux + uy * uy + uz * uz).sqrt();
-        let (u_axis_x, u_axis_y, u_axis_z) = if u_norm > 1e-12 {
-            (ux / u_norm, uy / u_norm, uz / u_norm)
-        } else {
-            // Degenerate axis — no anisotropy direction defined.
-            // Fall back to +z (canonical PMA easy axis).
-            (0.0, 0.0, 1.0)
-        };
+        let mut layer_alphas = [0.0f32; 4];
+        let mut layer_exchange_pfs = [0.0f32; 4];
+        let mut layer_anisotropy_pfs = [0.0f32; 4];
+        let mut layer_dmi_pfs = [0.0f32; 4];
+        let mut layer_sot_tau_dls = [0.0f32; 4];
+        let mut layer_sot_tau_fls = [0.0f32; 4];
+        let mut layer_thicknesses = [0.0f32; 4];
+        let mut layer_u_axes = [[0.0f32; 4]; MAX_LAYERS];
+        let mut layer_b_biases = [[0.0f32; 4]; MAX_LAYERS];
+        let mut layer_sigmas = [[0.0f32; 4]; MAX_LAYERS];
+
+        for (i, l) in eff.layers.iter().enumerate() {
+            layer_alphas[i] = l.alpha as f32;
+            layer_exchange_pfs[i] =
+                eff.exchange_prefactor(i, cfg.geometry.cell_size) as f32;
+            layer_anisotropy_pfs[i] = eff.anisotropy_prefactor(i) as f32;
+            layer_dmi_pfs[i] = eff.dmi_prefactor(i, cfg.geometry.cell_size) as f32;
+
+            let (tdl, tfl, sigma) = eff.sot_coefficients(i, cfg.j_current);
+            layer_sot_tau_dls[i] = tdl as f32;
+            layer_sot_tau_fls[i] = tfl as f32;
+            layer_sigmas[i] = [sigma[0] as f32, sigma[1] as f32, sigma[2] as f32, 0.0];
+
+            layer_thicknesses[i] = l.thickness as f32;
+
+            // Normalize u_axis at upload
+            let [ux, uy, uz] = l.u_axis;
+            let norm = (ux * ux + uy * uy + uz * uz).sqrt();
+            let (ax, ay, az) = if norm > 1e-12 {
+                (ux / norm, uy / norm, uz / norm)
+            } else {
+                (0.0, 0.0, 1.0)
+            };
+            layer_u_axes[i] = [ax as f32, ay as f32, az as f32, 0.0];
+
+            layer_b_biases[i] = [
+                l.b_bias[0] as f32, l.b_bias[1] as f32, l.b_bias[2] as f32, 0.0,
+            ];
+        }
+
+        // Per-layer interlayer-exchange prefactors (M2 — active)
+        let mut layer_ilx_below = [0.0f32; 4];
+        let mut layer_ilx_above = [0.0f32; 4];
+        for k in 0..nz {
+            layer_ilx_below[k] = eff.interlayer_prefactor_below(k) as f32;
+            layer_ilx_above[k] = eff.interlayer_prefactor_above(k) as f32;
+        }
+
+        // B_ext is global
+        let gamma = eff.layers.first().map(|l| l.gamma).unwrap_or(1.7595e11);
 
         Self {
             nx: cfg.geometry.nx,
             ny: cfg.geometry.ny,
-            cell_count: cfg.geometry.nx * cfg.geometry.ny,
-            _pad_grid: 0,
+            nz: cfg.nz(),
+            cell_count: cfg.cell_count(),
             dt: cfg.dt as f32,
-            gamma: eff.gamma as f32,
-            alpha: eff.alpha as f32,
+            gamma: gamma as f32,
             stab_coeff: cfg.stab_coeff as f32,
-            exchange_pf: eff.exchange_prefactor(cfg.geometry.cell_size) as f32,
-            anisotropy_pf: eff.anisotropy_prefactor() as f32,
-            _pad_mat0: 0.0,
-            _pad_mat1: 0.0,
-            u_axis_x: u_axis_x as f32,
-            u_axis_y: u_axis_y as f32,
-            u_axis_z: u_axis_z as f32,
-            _pad_axis: 0.0,
-            b_ext_x: cfg.b_ext[0] as f32,
-            b_ext_y: cfg.b_ext[1] as f32,
-            b_ext_z: cfg.b_ext[2] as f32,
-            _pad_ext: 0.0,
-            b_bias_x: eff.b_bias[0] as f32,
-            b_bias_y: eff.b_bias[1] as f32,
-            b_bias_z: eff.b_bias[2] as f32,
-            _pad_bias: 0.0,
-            dmi_pf: eff.dmi_prefactor(cfg.geometry.cell_size) as f32,
-            _pad_dmi0: 0.0,
-            _pad_dmi1: 0.0,
-            _pad_dmi2: 0.0,
-            sot_tau_dl: sot_tau_dl as f32,
-            sot_tau_fl: sot_tau_fl as f32,
-            _pad_sot0: 0.0,
-            _pad_sot1: 0.0,
-            sigma_x: sigma[0] as f32,
-            sigma_y: sigma[1] as f32,
-            sigma_z: sigma[2] as f32,
-            _pad_sigma: 0.0,
+            _pad_dyn: 0.0,
+            b_ext: [cfg.b_ext[0] as f32, cfg.b_ext[1] as f32, cfg.b_ext[2] as f32, 0.0],
+            layer_alphas,
+            layer_exchange_pfs,
+            layer_anisotropy_pfs,
+            layer_dmi_pfs,
+            layer_sot_tau_dls,
+            layer_sot_tau_fls,
+            layer_thicknesses,
+            layer_ilx_below,
+            layer_ilx_above,
+            layer_u_axes,
+            layer_b_biases,
+            layer_sigmas,
         }
     }
 }
@@ -129,12 +150,13 @@ impl GpuParams {
 pub struct Observables {
     pub step: usize,
     pub time_ps: f64,
+    /// Averages over ALL layers and all cells
     pub avg_mx: f32,
     pub avg_my: f32,
     pub avg_mz: f32,
     pub min_norm: f32,
     pub max_norm: f32,
-    /// Mz at virtual probe cell (MTJ readout)
+    /// Mz at the configured probe cell (single cell on a single layer)
     pub probe_mz: f32,
 }
 
@@ -181,6 +203,8 @@ pub struct GpuSolver {
 impl GpuSolver {
     /// Create solver with its own GPU device (headless mode).
     pub fn new(config: &SimConfig) -> Result<Self, String> {
+        config.stack.validate()?;
+
         let instance = wgpu::Instance::default();
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
@@ -203,19 +227,18 @@ impl GpuSolver {
         Self::from_device_queue(Arc::new(device), Arc::new(queue), config)
     }
 
-    /// Create solver using an existing GPU device (GUI / shared mode).
     pub fn from_device_queue(
         device: Arc<wgpu::Device>,
         queue: Arc<wgpu::Queue>,
         config: &SimConfig,
     ) -> Result<Self, String> {
-        let cell_count = config.geometry.nx * config.geometry.ny;
+        config.stack.validate()?;
+
+        let cell_count = config.cell_count();
         let buf_bytes = (cell_count as u64) * 4 * 4; // 4 f32 per cell
 
-        // ── Initial magnetization ──────────────────────────────
         let mag_data = Self::init_magnetization(config);
 
-        // ── Buffers ────────────────────────────────────────────
         let gpu_params = GpuParams::from_config(config);
 
         let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -263,7 +286,6 @@ impl GpuSolver {
             mapped_at_creation: false,
         });
 
-        // ── Shader + pipelines ─────────────────────────────────
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("llg"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/llg.wgsl").into()),
@@ -348,22 +370,20 @@ impl GpuSolver {
         })
     }
 
-    /// Initialize magnetization: uniform +z with small random perturbation.
+    /// Initialize magnetization: uniform +z with 5° random perturbation.
+    /// Applies the same profile to every layer.
     fn init_magnetization(config: &SimConfig) -> Vec<f32> {
         use rand::Rng;
-        let n = (config.geometry.nx * config.geometry.ny) as usize;
+        let n = config.cell_count() as usize;
         let mut data = vec![0.0f32; n * 4];
         let mut rng = rand::thread_rng();
-
         for i in 0..n {
-            // Small tilt from +z (5° cone)
-            let theta: f32 = rng.gen_range(0.0..0.087); // ~5°
+            let theta: f32 = rng.gen_range(0.0..0.087);
             let phi: f32 = rng.gen_range(0.0..std::f32::consts::TAU);
             let st = theta.sin();
             data[i * 4] = st * phi.cos();
             data[i * 4 + 1] = st * phi.sin();
             data[i * 4 + 2] = theta.cos();
-            // data[i*4 + 3] = 0.0 (padding, already zero)
         }
         data
     }
@@ -372,58 +392,37 @@ impl GpuSolver {
     pub fn step_n(&mut self, n: usize) {
         let wg = self.workgroups;
         let mut encoder = self.device.create_command_encoder(&Default::default());
-
         for _ in 0..n {
-            // Phase 0: field + torque from mag → torque_0
-            {
+            for pipeline in [
+                &self.ft_phase0_pipeline,
+                &self.predict_pipeline,
+                &self.ft_phase1_pipeline,
+                &self.correct_pipeline,
+            ] {
                 let mut p = encoder.begin_compute_pass(&Default::default());
-                p.set_pipeline(&self.ft_phase0_pipeline);
-                p.set_bind_group(0, &self.bind_group, &[]);
-                p.dispatch_workgroups(wg, 1, 1);
-            }
-            // Predict: m* = normalize(m + dt·T₀)
-            {
-                let mut p = encoder.begin_compute_pass(&Default::default());
-                p.set_pipeline(&self.predict_pipeline);
-                p.set_bind_group(0, &self.bind_group, &[]);
-                p.dispatch_workgroups(wg, 1, 1);
-            }
-            // Phase 1: field + torque from mag_pred → torque_1
-            {
-                let mut p = encoder.begin_compute_pass(&Default::default());
-                p.set_pipeline(&self.ft_phase1_pipeline);
-                p.set_bind_group(0, &self.bind_group, &[]);
-                p.dispatch_workgroups(wg, 1, 1);
-            }
-            // Correct: m = normalize(m + dt/2·(T₀+T₁))
-            {
-                let mut p = encoder.begin_compute_pass(&Default::default());
-                p.set_pipeline(&self.correct_pipeline);
+                p.set_pipeline(pipeline);
                 p.set_bind_group(0, &self.bind_group, &[]);
                 p.dispatch_workgroups(wg, 1, 1);
             }
         }
-
         self.queue.submit(Some(encoder.finish()));
         self.step += n;
     }
 
-    /// Read full magnetization back to CPU.
     pub fn readback_mag(&self) -> Vec<f32> {
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        encoder.copy_buffer_to_buffer(&self.mag_buf, 0, &self.mag_staging, 0, self.mag_staging.size());
+        encoder.copy_buffer_to_buffer(
+            &self.mag_buf, 0,
+            &self.mag_staging, 0,
+            self.mag_staging.size(),
+        );
         self.queue.submit(Some(encoder.finish()));
 
         let slice = self.mag_staging.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
-        });
-        let _ = self
-            .device
-            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+        let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
         rx.recv().unwrap().unwrap();
-
         let data = slice.get_mapped_range();
         let out: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
         drop(data);
@@ -431,7 +430,7 @@ impl GpuSolver {
         out
     }
 
-    /// Compute observables from readback data.
+    /// Compute observables over the entire stack (all cells, all layers).
     pub fn observables(&self) -> Observables {
         let mag = self.readback_mag();
         let n = self.cell_count as usize;
@@ -456,9 +455,12 @@ impl GpuSolver {
 
         let inv = 1.0 / n as f64;
 
-        // Virtual probe: center cell or configured index
-        let probe_idx = self.config.probe_idx.unwrap_or(self.cell_count / 2) as usize;
-        let probe_mz = if probe_idx < n { mag[probe_idx * 4 + 2] } else { 0.0 };
+        // Probe: cell (probe_idx) at layer (probe_layer, default 0)
+        let in_plane = self.config.geometry.nx * self.config.geometry.ny;
+        let probe_layer = self.config.probe_layer.unwrap_or(0).min(self.config.nz() - 1);
+        let probe_in_plane = self.config.probe_idx.unwrap_or(in_plane / 2).min(in_plane - 1);
+        let probe_cell = probe_layer * in_plane + probe_in_plane;
+        let probe_mz = if (probe_cell as usize) < n { mag[probe_cell as usize * 4 + 2] } else { 0.0 };
 
         Observables {
             step: self.step,
@@ -472,71 +474,106 @@ impl GpuSolver {
         }
     }
 
-    /// Update external field at runtime.
-    pub fn set_b_ext(&self, bx: f32, by: f32, bz: f32) {
-        // b_ext starts at byte offset 64 in GpuParams (4th vec4)
+    /// Fully re-upload GpuParams (useful after runtime changes to stack/substrate).
+    pub fn upload_params(&self) {
+        let params = GpuParams::from_config(&self.config);
+        self.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&params));
+    }
+
+    /// Update external field at runtime. Offset 32 in the new layout.
+    pub fn set_b_ext(&mut self, bx: f32, by: f32, bz: f32) {
+        self.config.b_ext = [bx as f64, by as f64, bz as f64];
         let data = [bx, by, bz, 0.0f32];
+        self.queue.write_buffer(&self.params_buf, 32, bytemuck::cast_slice(&data));
+    }
+
+    /// Override α of all layers simultaneously at runtime.
+    pub fn set_alpha(&mut self, alpha: f32) {
+        let data = [alpha; 4];
+        self.queue.write_buffer(&self.params_buf, 48, bytemuck::cast_slice(&data));
+    }
+
+    /// Override exchange prefactor of all layers simultaneously at runtime.
+    pub fn set_exchange_pf(&self, pf: f32) {
+        let data = [pf; 4];
         self.queue.write_buffer(&self.params_buf, 64, bytemuck::cast_slice(&data));
     }
 
-    /// Update exchange bias field at runtime (substrate-pinned reference direction).
-    pub fn set_b_bias(&self, bx: f32, by: f32, bz: f32) {
-        // b_bias starts at byte offset 80 in GpuParams (5th vec4)
-        let data = [bx, by, bz, 0.0f32];
-        self.queue.write_buffer(&self.params_buf, 80, bytemuck::cast_slice(&data));
-    }
-
-    /// Update DMI prefactor at runtime.
+    /// Override per-layer DMI prefactor for all layers at runtime.
     pub fn set_dmi_pf(&self, pf: f32) {
-        // dmi_pf at byte offset 96 (6th vec4, first slot)
-        self.queue.write_buffer(&self.params_buf, 96, bytemuck::bytes_of(&pf));
+        let data = [pf; 4];
+        self.queue.write_buffer(&self.params_buf, 96, bytemuck::cast_slice(&data));
     }
 
-    /// Update SOT torque strengths at runtime. σ is left unchanged.
+    /// Update interlayer-exchange prefactors at runtime (Phase M2).
+    pub fn set_interlayer_pfs(&self, below: [f32; 4], above: [f32; 4]) {
+        self.queue.write_buffer(&self.params_buf, 160, bytemuck::cast_slice(&below));
+        self.queue.write_buffer(&self.params_buf, 176, bytemuck::cast_slice(&above));
+    }
+
+    /// Update exchange bias for layer 0 at runtime.
+    pub fn set_b_bias(&self, bx: f32, by: f32, bz: f32) {
+        // layer_b_biases starts at offset 256, layer 0 occupies first 16 bytes
+        let data = [bx, by, bz, 0.0f32];
+        self.queue.write_buffer(&self.params_buf, 256, bytemuck::cast_slice(&data));
+    }
+
+    /// Update SOT torques for layer 0 at runtime.
     pub fn set_sot(&self, tau_dl: f32, tau_fl: f32) {
-        // sot_tau_dl at byte offset 112, sot_tau_fl at 116
-        let data = [tau_dl, tau_fl];
-        self.queue.write_buffer(&self.params_buf, 112, bytemuck::cast_slice(&data));
+        // layer_sot_tau_dls at 112, layer_sot_tau_fls at 128
+        let tdl = [tau_dl; 4];
+        let tfl = [tau_fl; 4];
+        self.queue.write_buffer(&self.params_buf, 112, bytemuck::cast_slice(&tdl));
+        self.queue.write_buffer(&self.params_buf, 128, bytemuck::cast_slice(&tfl));
     }
 
-    /// Update SOT spin polarization direction σ at runtime.
+    /// Update σ direction for layer 0 at runtime.
     pub fn set_sigma(&self, sx: f32, sy: f32, sz: f32) {
-        // sigma at byte offset 128 (8th vec4)
+        // layer_sigmas starts at offset 320, layer 0 first 16 bytes
         let data = [sx, sy, sz, 0.0f32];
-        self.queue.write_buffer(&self.params_buf, 128, bytemuck::cast_slice(&data));
+        self.queue.write_buffer(&self.params_buf, 320, bytemuck::cast_slice(&data));
     }
 
-    /// Update damping parameter at runtime.
-    pub fn set_alpha(&self, alpha: f32) {
-        // alpha is at byte offset 24 (6th f32)
-        self.queue.write_buffer(&self.params_buf, 24, bytemuck::bytes_of(&alpha));
-    }
+    pub fn step_count(&self) -> usize { self.step }
+    pub fn config(&self) -> &SimConfig { &self.config }
 
-    /// Update exchange prefactor at runtime (for parameter sweeps).
-    pub fn set_exchange_pf(&self, pf: f32) {
-        // exchange_pf is at byte offset 32 (8th f32)
-        self.queue.write_buffer(&self.params_buf, 32, bytemuck::bytes_of(&pf));
-    }
-
-    pub fn step_count(&self) -> usize {
-        self.step
-    }
-
-    /// Re-upload magnetization: uniform +z with small perturbation.
+    /// Re-upload magnetization: uniform +z with small perturbation (all layers).
     pub fn reset_uniform_z(&mut self) {
         let data = Self::init_magnetization(&self.config);
         self.queue.write_buffer(&self.mag_buf, 0, bytemuck::cast_slice(&data));
         self.step = 0;
     }
 
-    /// Re-upload magnetization: fully random unit vectors.
+    /// Re-upload magnetization: alternating +z / -z through the stack layers.
+    /// Layer 0 → +z, Layer 1 → -z, Layer 2 → +z, etc. (with 5° random cone).
+    /// Natural initial condition for synthetic-AFM heterostructures.
+    pub fn reset_uniform_z_alternating(&mut self) {
+        use rand::Rng;
+        let n = self.cell_count as usize;
+        let in_plane = (self.config.geometry.nx * self.config.geometry.ny) as usize;
+        let mut data = vec![0.0f32; n * 4];
+        let mut rng = rand::thread_rng();
+        for cell in 0..n {
+            let iz = cell / in_plane;
+            let sign: f32 = if iz % 2 == 0 { 1.0 } else { -1.0 };
+            let theta: f32 = rng.gen_range(0.0..0.087);
+            let phi: f32 = rng.gen_range(0.0..std::f32::consts::TAU);
+            let st = theta.sin();
+            data[cell * 4] = st * phi.cos();
+            data[cell * 4 + 1] = st * phi.sin();
+            data[cell * 4 + 2] = sign * theta.cos();
+        }
+        self.queue.write_buffer(&self.mag_buf, 0, bytemuck::cast_slice(&data));
+        self.step = 0;
+    }
+
+    /// Re-upload magnetization: fully random unit vectors (all layers).
     pub fn reset_random(&mut self) {
         use rand::Rng;
         let n = self.cell_count as usize;
         let mut data = vec![0.0f32; n * 4];
         let mut rng = rand::thread_rng();
         for i in 0..n {
-            // Uniform random point on sphere (Marsaglia method)
             loop {
                 let x: f32 = rng.gen_range(-1.0..1.0);
                 let y: f32 = rng.gen_range(-1.0..1.0);
@@ -554,23 +591,47 @@ impl GpuSolver {
         self.step = 0;
     }
 
-    /// Re-upload magnetization: Néel skyrmion seeded at the grid center.
-    /// Profile: θ(r) = 2·atan(R/r) with m_z(0) = -1 (core) and m_z(∞) → +1 (background).
-    /// In-plane orientation is OUTWARD radial — the Néel chirality stabilized by
-    /// positive D under the standard Thiaville 2012 convention used in llg.wgsl.
-    /// With no DMI the skyrmion collapses; with D above the critical value it
-    /// stabilizes as a metastable soliton.
+    /// Re-upload magnetization: stripe domains (alternating +z / -z) on each layer.
+    pub fn reset_stripe_domains(&mut self, stripe_width: u32) {
+        use rand::Rng;
+        let n = self.cell_count as usize;
+        let nx = self.config.geometry.nx;
+        let ny = self.config.geometry.ny;
+        let in_plane = nx * ny;
+        let mut data = vec![0.0f32; n * 4];
+        let mut rng = rand::thread_rng();
+        for cell in 0..n {
+            let cell_u = cell as u32;
+            let in_plane_idx = cell_u % in_plane;
+            let ix = in_plane_idx / ny;
+            let mz_sign: f32 = if (ix / stripe_width) % 2 == 0 { 1.0 } else { -1.0 };
+            let theta: f32 = rng.gen_range(0.0..0.087);
+            let phi: f32 = rng.gen_range(0.0..std::f32::consts::TAU);
+            let st = theta.sin();
+            data[cell * 4] = st * phi.cos();
+            data[cell * 4 + 1] = st * phi.sin();
+            data[cell * 4 + 2] = mz_sign * theta.cos();
+        }
+        self.queue.write_buffer(&self.mag_buf, 0, bytemuck::cast_slice(&data));
+        self.step = 0;
+    }
+
+    /// Re-upload magnetization: Néel skyrmion seed on every layer.
     pub fn reset_skyrmion_seed(&mut self, radius_nm: f64) {
         let n = self.cell_count as usize;
+        let nx = self.config.geometry.nx;
         let ny = self.config.geometry.ny;
+        let in_plane = nx * ny;
         let dx = self.config.geometry.cell_size;
         let r0 = radius_nm * 1e-9;
-        let cx = self.config.geometry.nx as f64 * dx * 0.5;
+        let cx = nx as f64 * dx * 0.5;
         let cy = ny as f64 * dx * 0.5;
         let mut data = vec![0.0f32; n * 4];
-        for i in 0..n {
-            let ix = (i as u32) / ny;
-            let iy = (i as u32) % ny;
+        for cell in 0..n {
+            let cell_u = cell as u32;
+            let in_plane_idx = cell_u % in_plane;
+            let ix = in_plane_idx / ny;
+            let iy = in_plane_idx % ny;
             let x = (ix as f64 + 0.5) * dx - cx;
             let y = (iy as f64 + 0.5) * dx - cy;
             let r = (x * x + y * y).sqrt();
@@ -582,44 +643,13 @@ impl GpuSolver {
             let phi = y.atan2(x);
             let mz = theta.cos();
             let ms = theta.sin();
-            // Outward-radial Néel skyrmion — stable chirality for D > 0 under
-            // Thiaville convention
             let mx = ms * phi.cos();
             let my = ms * phi.sin();
-            data[i * 4] = mx as f32;
-            data[i * 4 + 1] = my as f32;
-            data[i * 4 + 2] = mz as f32;
+            data[cell * 4] = mx as f32;
+            data[cell * 4 + 1] = my as f32;
+            data[cell * 4 + 2] = mz as f32;
         }
         self.queue.write_buffer(&self.mag_buf, 0, bytemuck::cast_slice(&data));
         self.step = 0;
-    }
-
-    /// Re-upload magnetization: stripe domains (alternating +z / -z).
-    /// Adds a small transverse perturbation (~5° cone) so domain walls can
-    /// evolve. Without it, adjacent +z/-z cells are collinear, `m × B_exch`
-    /// vanishes, and the sharp walls are frozen in a metastable state.
-    pub fn reset_stripe_domains(&mut self, stripe_width: u32) {
-        use rand::Rng;
-        let n = self.cell_count as usize;
-        let ny = self.config.geometry.ny;
-        let mut data = vec![0.0f32; n * 4];
-        let mut rng = rand::thread_rng();
-        for i in 0..n {
-            let ix = (i as u32) / ny;
-            let mz_sign: f32 = if (ix / stripe_width) % 2 == 0 { 1.0 } else { -1.0 };
-            // Small transverse tilt breaks collinear symmetry at walls
-            let theta: f32 = rng.gen_range(0.0..0.087);
-            let phi: f32 = rng.gen_range(0.0..std::f32::consts::TAU);
-            let st = theta.sin();
-            data[i * 4] = st * phi.cos();
-            data[i * 4 + 1] = st * phi.sin();
-            data[i * 4 + 2] = mz_sign * theta.cos();
-        }
-        self.queue.write_buffer(&self.mag_buf, 0, bytemuck::cast_slice(&data));
-        self.step = 0;
-    }
-
-    pub fn config(&self) -> &SimConfig {
-        &self.config
     }
 }

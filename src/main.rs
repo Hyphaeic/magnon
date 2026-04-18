@@ -1,7 +1,38 @@
-use magnonic_clock_sim::config::SimConfig;
+use magnonic_clock_sim::config::{Layer, SimConfig};
 use magnonic_clock_sim::gpu::GpuSolver;
 use magnonic_clock_sim::material::BulkMaterial;
 use magnonic_clock_sim::substrate::Substrate;
+
+/// Parse a `--stack` spec like "fgt-bulk:0.7,yig:2.0,fgt-bulk:0.7" into Layers.
+fn parse_stack(spec: &str) -> Result<Vec<Layer>, String> {
+    spec.split(',')
+        .map(|entry| {
+            let parts: Vec<&str> = entry.trim().split(':').collect();
+            if parts.len() != 2 {
+                return Err(format!(
+                    "Bad layer spec '{entry}' — expected MATERIAL:THICKNESS_NM"
+                ));
+            }
+            let name = parts[0].trim();
+            let thickness_nm: f64 = parts[1].trim().parse()
+                .map_err(|e| format!("Bad thickness in '{entry}': {e}"))?;
+            let material = BulkMaterial::lookup(name)
+                .ok_or_else(|| format!("Unknown material '{name}' — see --list-materials"))?;
+            Ok(Layer {
+                material,
+                thickness: thickness_nm * 1e-9,
+                u_axis: [0.0, 0.0, 1.0],
+            })
+        })
+        .collect()
+}
+
+/// Parse a comma-separated list of f64 values.
+fn parse_f64_list(s: &str) -> Result<Vec<f64>, String> {
+    s.split(',')
+        .map(|x| x.trim().parse::<f64>().map_err(|e| format!("'{x}': {e}")))
+        .collect()
+}
 
 fn main() {
     env_logger::init();
@@ -15,9 +46,10 @@ fn main() {
             "--nx" => { config.geometry.nx = args[i + 1].parse().unwrap(); i += 2; }
             "--ny" => { config.geometry.ny = args[i + 1].parse().unwrap(); i += 2; }
             "--thickness" => {
-                // Argument in nm
+                // Sets thickness of the FIRST layer (backward compat).
+                // For multilayer, use --stack (M3).
                 let nm: f64 = args[i + 1].parse().unwrap();
-                config.geometry.thickness = nm * 1e-9;
+                config.stack.layers[0].thickness = nm * 1e-9;
                 i += 2;
             }
             "--cell-size" => {
@@ -28,7 +60,7 @@ fn main() {
             "--material" => {
                 let name = &args[i + 1];
                 match BulkMaterial::lookup(name) {
-                    Some(m) => { config.bulk = m; }
+                    Some(m) => { config.stack.layers[0].material = m; }
                     None => {
                         eprintln!("Unknown material: {name}. Use --list-materials to see options.");
                         std::process::exit(1);
@@ -45,6 +77,63 @@ fn main() {
                         std::process::exit(1);
                     }
                 }
+                i += 2;
+            }
+            "--stack" => {
+                // Multi-layer stack spec: "MAT1:T_nm,MAT2:T_nm,..."
+                match parse_stack(&args[i + 1]) {
+                    Ok(layers) => {
+                        let n_interfaces = layers.len().saturating_sub(1);
+                        config.stack.layers = layers;
+                        // Resize coupling arrays to match (fill with zeros / default spacing)
+                        config.stack.interlayer_a.resize(n_interfaces, 0.0);
+                        config.stack.layer_spacing.resize(n_interfaces, 0.7e-9);
+                    }
+                    Err(e) => {
+                        eprintln!("Error parsing --stack: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                i += 2;
+            }
+            "--interlayer-a" => {
+                // Comma-separated A_inter values [J/m], one per interface.
+                match parse_f64_list(&args[i + 1]) {
+                    Ok(vals) => {
+                        let expected = config.stack.layers.len().saturating_sub(1);
+                        if vals.len() != expected {
+                            eprintln!(
+                                "--interlayer-a has {} values, expected {} (N_layers - 1)",
+                                vals.len(), expected
+                            );
+                            std::process::exit(1);
+                        }
+                        config.stack.interlayer_a = vals;
+                    }
+                    Err(e) => { eprintln!("--interlayer-a parse error: {e}"); std::process::exit(1); }
+                }
+                i += 2;
+            }
+            "--layer-spacing" => {
+                // Comma-separated spacings [nm], one per interface.
+                match parse_f64_list(&args[i + 1]) {
+                    Ok(vals_nm) => {
+                        let expected = config.stack.layers.len().saturating_sub(1);
+                        if vals_nm.len() != expected {
+                            eprintln!(
+                                "--layer-spacing has {} values, expected {} (N_layers - 1)",
+                                vals_nm.len(), expected
+                            );
+                            std::process::exit(1);
+                        }
+                        config.stack.layer_spacing = vals_nm.iter().map(|nm| nm * 1e-9).collect();
+                    }
+                    Err(e) => { eprintln!("--layer-spacing parse error: {e}"); std::process::exit(1); }
+                }
+                i += 2;
+            }
+            "--probe-layer" => {
+                config.probe_layer = Some(args[i + 1].parse().unwrap());
                 i += 2;
             }
             "--list-materials" => {
@@ -67,19 +156,20 @@ fn main() {
             "--interval" => { config.readback_interval = args[i + 1].parse().unwrap(); i += 2; }
             "--alpha" => {
                 // Overrides bulk damping (post-lookup)
-                config.bulk.alpha_bulk = args[i + 1].parse().unwrap();
+                // Overrides alpha of the first layer's bulk material
+                config.stack.layers[0].material.alpha_bulk = args[i + 1].parse().unwrap();
                 i += 2;
             }
             "--a-ex" => {
-                config.bulk.a_ex_bulk = args[i + 1].parse().unwrap();
+                config.stack.layers[0].material.a_ex_bulk = args[i + 1].parse().unwrap();
                 i += 2;
             }
             "--k-u" => {
-                config.bulk.k_u_bulk = args[i + 1].parse().unwrap();
+                config.stack.layers[0].material.k_u_bulk = args[i + 1].parse().unwrap();
                 i += 2;
             }
             "--ms" => {
-                config.bulk.ms_bulk = args[i + 1].parse().unwrap();
+                config.stack.layers[0].material.ms_bulk = args[i + 1].parse().unwrap();
                 i += 2;
             }
             "--init" => {
@@ -112,22 +202,34 @@ fn main() {
             "--help" | "-h" => {
                 eprintln!("magnonic-sim [options]");
                 eprintln!();
-                eprintln!("Design choices:");
-                eprintln!("  --material NAME     Bulk material (default fgt-effective)");
+                eprintln!("Monolayer design choices:");
+                eprintln!("  --material NAME     Bulk material (default fgt-bulk)");
                 eprintln!("  --substrate NAME    Substrate (default vacuum)");
-                eprintln!("  --thickness NM      Film thickness in nm (default 0.7)");
+                eprintln!("  --thickness NM      First-layer thickness in nm (default 0.7)");
                 eprintln!("  --cell-size NM      In-plane cell size in nm (default 2.5)");
                 eprintln!("  --nx N / --ny N     Grid dimensions (default 256)");
                 eprintln!();
+                eprintln!("Multilayer stack (M3):");
+                eprintln!("  --stack \"MAT1:T_nm,MAT2:T_nm,...\"");
+                eprintln!("                      Specify a heterostructure. Overrides --material and --thickness.");
+                eprintln!("                      Example: \"yig:2.0,fgt-bulk:0.7\"");
+                eprintln!("  --interlayer-a F1,F2,...     Per-interface exchange A [J/m], N_layers-1 values");
+                eprintln!("  --layer-spacing NM1,NM2,...  Per-interface z-spacing [nm], N_layers-1 values (default 0.7)");
+                eprintln!("  --probe-layer N     Layer index to probe (default 0 = bottom)");
+                eprintln!();
                 eprintln!("Conditions:");
                 eprintln!("  --bx F / --by F / --bz F   External field components [T]");
-                eprintln!("  --dt F              Timestep [s] (default 1e-13)");
+                eprintln!("  --jx F / --jy F / --jz F   Charge current [A/m²] (SOT drive of layer 0)");
+                eprintln!("  --dt F              Timestep [s] (default 1e-14)");
+                eprintln!("  --init MODE         uniform | random | stripe | skyrmion | alternating");
                 eprintln!();
-                eprintln!("Material overrides (post-lookup):");
+                eprintln!("Material overrides (apply to first layer post-lookup):");
                 eprintln!("  --alpha F           Bulk Gilbert damping");
                 eprintln!("  --a-ex F            Exchange stiffness [J/m]");
                 eprintln!("  --k-u F             Uniaxial anisotropy [J/m³]");
                 eprintln!("  --ms F              Saturation magnetization [A/m]");
+                eprintln!("  --d-dmi F           Substrate DMI override [J/m²]");
+                eprintln!("  --theta-sh F        Substrate spin Hall angle");
                 eprintln!();
                 eprintln!("Run control:");
                 eprintln!("  --steps N           Total steps (default 10000)");
@@ -136,6 +238,11 @@ fn main() {
                 eprintln!("Catalog:");
                 eprintln!("  --list-materials    Print all available bulk materials");
                 eprintln!("  --list-substrates   Print all available substrates");
+                eprintln!();
+                eprintln!("Example — YIG/FGT ferromagnetically coupled bilayer:");
+                eprintln!("  magnonic-sim --stack \"yig:2.0,fgt-bulk:0.7\" \\");
+                eprintln!("               --interlayer-a 4e-13 --layer-spacing 1.35 \\");
+                eprintln!("               --substrate pt --dt 1e-14 --steps 10000");
                 std::process::exit(0);
             }
             other => {
@@ -146,7 +253,7 @@ fn main() {
     }
 
     config.print_summary();
-    config.effective().print_sot(config.j_current, config.geometry.thickness);
+    config.effective().print_sot(config.j_current);
 
     let mut solver = GpuSolver::new(&config).expect("Failed to initialize GPU solver");
 
@@ -156,6 +263,10 @@ fn main() {
             "random" => { solver.reset_random(); eprintln!("INIT: random unit vectors"); }
             "stripe" => { solver.reset_stripe_domains(8); eprintln!("INIT: stripe domains"); }
             "uniform" => { solver.reset_uniform_z(); eprintln!("INIT: uniform +z + 5° cone"); }
+            "alternating" => {
+                solver.reset_uniform_z_alternating();
+                eprintln!("INIT: alternating +z/-z per layer (synthetic AFM)");
+            }
             "skyrmion" => {
                 let default_r = (config.geometry.nx.min(config.geometry.ny) as f64)
                     * config.geometry.cell_size * 1e9 / 6.0;

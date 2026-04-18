@@ -104,6 +104,22 @@ impl BulkMaterial {
         }
     }
 
+    /// YIG (yttrium iron garnet, Y₃Fe₅O₁₂) — ultra-low-damping ferrimagnetic insulator.
+    /// Used here as a bulk layer material for hybrid heterostructures (e.g., YIG/FGT).
+    /// Cubic anisotropy K₁ ≈ -610 J/m³ is negligible compared to exchange; set K_u = 0.
+    pub fn yig_bulk() -> Self {
+        Self {
+            name: "yig-bulk",
+            ms_bulk: 1.4e5,
+            a_ex_bulk: 3.65e-12,
+            k_u_bulk: 0.0,
+            alpha_bulk: 3.0e-5,
+            gamma: 1.7595e11,
+            tc_bulk: 560.0,
+            notes: "YIG (Y3Fe5O12). Ferrimagnet, ultra-low intrinsic damping. K1 (cubic, ~-610 J/m³) not represented in uniaxial model.",
+        }
+    }
+
     /// Permalloy (Ni₈₀Fe₂₀) — soft magnetic, zero anisotropy, magnonics reference.
     pub fn permalloy_bulk() -> Self {
         Self {
@@ -129,6 +145,7 @@ impl BulkMaterial {
             "fga-te2" | "fga-te2-bulk" | "fe3gate2" => Some(Self::fga_te2_bulk()),
             "cri3" | "cri3-bulk" => Some(Self::cri3_bulk()),
             "cofeb" | "cofeb-bulk" => Some(Self::cofeb_bulk()),
+            "yig" | "yig-bulk" => Some(Self::yig_bulk()),
             "permalloy" | "permalloy-bulk" | "py" => Some(Self::permalloy_bulk()),
             _ => None,
         }
@@ -142,6 +159,7 @@ impl BulkMaterial {
             Self::fga_te2_bulk(),
             Self::cri3_bulk(),
             Self::cofeb_bulk(),
+            Self::yig_bulk(),
             Self::permalloy_bulk(),
         ]
     }
