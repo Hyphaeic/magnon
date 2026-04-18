@@ -56,7 +56,7 @@ struct Params {
     // Up to 4 active pulses, each with independent amplitude (time-dependent,
     // host-updated per step), spot center + σ_r (static), and direction.
     pulse_count: u32,
-    _pad_pc0: u32,
+    enable_llb_flag: u32,
     _pad_pc1: u32,
     _pad_pc2: u32,
     pulse_amplitudes: vec4<f32>,                      // [T], packed 4 pulses
@@ -607,10 +607,17 @@ fn advance_m3tm(@builtin(global_invocation_id) gid: vec3<u32>) {
     let iz = layer_of(idx);
     let dt = params.dt;
 
+    // P3c: when LLB owns |m|, feed it into Koopmans R from the mag buffer.
+    // Otherwise (P3a/P3b path with enable_llb=0), M3TM keeps its own |m|
+    // track in m_reduced.
+    let b = idx * 4u;
+    let mag_mag = length(vec3<f32>(mag[b], mag[b + 1u], mag[b + 2u]));
+    let m_input = select(m_reduced[idx], mag_mag, params.enable_llb_flag != 0u);
+
     var s: M3tmState;
     s.t_e = temp_e[idx];
     s.t_p = temp_p[idx];
-    s.m   = m_reduced[idx];
+    s.m   = m_input;
 
     let p_laser = laser_power_density_at(idx);
 
@@ -629,5 +636,7 @@ fn advance_m3tm(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     temp_e[idx] = new_te;
     temp_p[idx] = new_tp;
-    m_reduced[idx] = new_m;
+    // With LLB active, mirror m_reduced to |mag| for observability; LLB
+    // owns the source of truth. Otherwise M3TM writes its integrated |m|.
+    m_reduced[idx] = select(new_m, mag_mag, params.enable_llb_flag != 0u);
 }

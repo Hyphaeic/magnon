@@ -1,9 +1,68 @@
-use magnonic_clock_sim::config::{Layer, SimConfig};
+use magnonic_clock_sim::config::{Geometry, Layer, SimConfig, Stack};
 use magnonic_clock_sim::gpu::GpuSolver;
 use magnonic_clock_sim::material::BulkMaterial;
 use magnonic_clock_sim::material_thermal;
 use magnonic_clock_sim::photonic::{parse_pulse_spec, ThermalConfig};
 use magnonic_clock_sim::substrate::Substrate;
+
+/// Apply a canonical benchmark config shortcut. Returns Err if unknown.
+fn apply_benchmark(cfg: &mut SimConfig, name: &str) -> Result<(), String> {
+    match name {
+        "beaurepaire-ni" => {
+            // 20 nm Ni-like, 100 fs FWHM, 7 mJ/cm² absorbed, T_amb=300 K.
+            let preset = material_thermal::ni_m3tm();
+            let mut stack = Stack::monolayer(
+                BulkMaterial::permalloy_bulk(),
+                20e-9,
+                [0.0, 0.0, 1.0],
+            );
+            stack.layers[0].material.alpha_bulk = preset.alpha_0;
+            cfg.stack = stack;
+            cfg.substrate = Substrate::vacuum();
+            cfg.geometry = Geometry { nx: 1, ny: 1, cell_size: 20e-9 };
+            cfg.dt = 1.0e-15;
+            cfg.b_ext = [0.0, 0.0, 0.0];
+            cfg.j_current = [0.0, 0.0, 0.0];
+            cfg.total_steps = 10_000;
+            cfg.readback_interval = 100;
+            cfg.photonic.pulses = vec![parse_pulse_spec(
+                "t=300fs,fwhm=100fs,peak=0.0,dir=z,fluence=7.0,R=0.0",
+            )?];
+            cfg.photonic.thermal = Some(ThermalConfig {
+                t_ambient: 300.0,
+                per_layer: vec![preset],
+                thermal_dt_cap: 1.0e-15,
+                thermal_window: (0.5e-12, 10e-12),
+                enable_llb: true,
+            });
+            Ok(())
+        }
+        "mumag-sp4-proxy" => {
+            // Deterministic skyrmion on fgt_default + 10 mT transverse bias;
+            // both LLG and LLB-at-T=0 paths should match.
+            cfg.geometry = Geometry { nx: 32, ny: 32, cell_size: 2.5e-9 };
+            cfg.dt = 1.0e-14;
+            cfg.b_ext = [0.01, 0.0, 0.0];
+            cfg.total_steps = 2_000;
+            cfg.readback_interval = 10;
+            let mut preset = material_thermal::fgt_ni_surrogate();
+            preset.a_sf = 0.0;
+            preset.alpha_0 = cfg.stack.layers[0].material.alpha_bulk;
+            cfg.photonic.thermal = Some(ThermalConfig {
+                t_ambient: 0.0,
+                per_layer: vec![preset],
+                thermal_dt_cap: 1.0e-15,
+                thermal_window: (0.0, 0.0),
+                enable_llb: true,
+            });
+            // Deterministic init (no RNG): seed a skyrmion of radius 12 nm.
+            std::env::set_var("MAGNONIC_INIT", "skyrmion");
+            std::env::set_var("MAGNONIC_SKYRMION_R_NM", "12");
+            Ok(())
+        }
+        other => Err(format!("unknown benchmark '{other}' — try 'beaurepaire-ni' or 'mumag-sp4-proxy'")),
+    }
+}
 
 /// Parse a `--stack` spec like "fgt-bulk:0.7,yig:2.0,fgt-bulk:0.7" into Layers.
 fn parse_stack(spec: &str) -> Result<Vec<Layer>, String> {
@@ -169,6 +228,13 @@ fn main() {
             "--thermal-dt-cap" => {
                 let t = config.photonic.thermal.get_or_insert_with(ThermalConfig::default);
                 t.thermal_dt_cap = args[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--benchmark" => {
+                if let Err(e) = apply_benchmark(&mut config, &args[i + 1]) {
+                    eprintln!("--benchmark: {e}");
+                    std::process::exit(1);
+                }
                 i += 2;
             }
             "--thermal-params-for" => {

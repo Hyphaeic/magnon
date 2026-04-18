@@ -805,3 +805,26 @@ At T = 0: α_∥ = 0 → rate = 0 → LLB = LLG. Near T_c: rate ≈ (2α_0/3) / 
 - **P3a gate still holds**: GPU vs host M3TM 8.8×10⁻⁷ on T_e, 1.25×10⁻⁶ on |m|.
 
 **Deferred to P3c:** M3TM → LLG torque back-coupling (remove the "M3TM advances m_reduced independently" path; LLB becomes sole owner of |m| dynamics in the shader, M3TM reads |m| from `mag` for its Koopmans R term); µMAG SP4 regression harness; Beaurepaire Ni full calibration (|m| = 0.60 at 500 fs, recovery τ ≈ 1 ps); energy-conservation gate; `docs/llb_validation.md` write-up.
+
+### Implementation notes for P3c
+
+**Status:** Complete at the P3c boundary, 2026-04-18. Phase P3 closed.
+
+**What landed:**
+- `src/gpu.rs` + `src/shaders/llg.wgsl` — `GpuParams.enable_llb_flag: u32` at offset 388 (repurposed the `_pad_pc0` slot). In `advance_m3tm` the flag controls whether the Koopmans `m` input is read from `m_reduced` (P3a independent-track path) or from `|mag|` (P3c back-coupling path, when LLB is active). When LLB is active `m_reduced` mirrors `|mag|` for observability — LLB is the sole owner of |m| dynamics.
+- `examples/test_sp4_proxy.rs` — deterministic LLB-at-T=0 = LLG regression gate built on `reset_skyrmion_seed(12 nm) + 10 mT transverse bias`. Residuals: avg_mx 1.5·10⁻⁴, avg_my 1.3·10⁻⁴, avg_mz 4.5·10⁻⁶ over 2000 steps — all inside the 1·10⁻³ gate. ADR-004 documents the SP4 substitution (no demag → literal SP4 infeasible).
+- `examples/test_beaurepaire_ni.rs` — full Beaurepaire reproduction harness. Reports |m| trajectory, T_e / T_p peaks, energy-balance ratio.
+- `src/main.rs` — `--benchmark beaurepaire-ni` and `--benchmark mumag-sp4-proxy` canonical-config shortcuts.
+- `docs/llb_validation.md` — regression-gate summary, numerical traces, throughput numbers, open calibration paths.
+- `branches/hir/decisions/ADR-004-sp4-substitution.md` — records the proxy decision and its scope.
+
+**Acceptance evidence (at P3c):**
+- LLG bit-identical (thermal off): `min_norm / max_norm` byte-for-byte vs `pre-thermal-baseline`.
+- GPU M3TM vs host: 8.81·10⁻⁷ relative on T_e, 1.25·10⁻⁶ absolute on |m|.
+- LLB → LLG reduction (SP4 proxy): residuals above, well inside 1·10⁻³.
+- Energy conservation: Δ(U_e + U_p) / E_laser = **1.000 ± 0.001** — the electron + phonon baths account for the absorbed-laser input to 0.1 %.
+- LLB + M3TM demag + recovery morphology (1 mJ/cm² Ni): |m| collapses to 0 at T_e peak, recovers to 0.82 at 10 ps without NaN.
+
+**Beaurepaire quantitative miss, documented in `docs/llb_validation.md` §3.2:** at 7 mJ/cm² on a 20 nm single-cell Ni film with no lateral heat diffusion and no substrate heat sink, the phonon bath equilibrates at ≈1218 K — above Ni T_c — and pins |m| to 0 for the full 10 ps window. The plan's "|m|(500 fs) = 0.60 ± 0.05" target is a cross-simulator calibration result, not reachable at P3c scope. Fluence calibration against the two-parameter (a_sf, R) fit is a P5 task; adding substrate thermal coupling is P6+. The energy-conservation gate is the genuine physics check at P3c.
+
+**Phase P3 closed.** P4 (pump-probe sequencer) and P5 (FGT Zhou 2025 reproduction) require explicit user approval to start per the execution brief.

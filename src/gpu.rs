@@ -95,9 +95,13 @@ struct GpuParams {
     // weighted sum over all active pulses. Pulses with spot_sigma = 0 are
     // treated as spatially uniform (P1-equivalent).
 
-    // 384-399: active pulse count + padding
+    // 384-399: active pulse count + P3c flag + padding.
+    // `enable_llb_flag` (offset 388) engages the LLB back-coupling in the
+    // M3TM kernel — when 1, advance_m3tm reads |m| from `mag` and mirrors
+    // `m_reduced` to it; when 0, m_reduced is the M3TM's independent track
+    // (P3a behaviour).
     pulse_count: u32,
-    _pad_pc0: u32,
+    enable_llb_flag: u32,
     _pad_pc1: u32,
     _pad_pc2: u32,
 
@@ -233,7 +237,11 @@ impl GpuParams {
                 }
                 n.min(4) as u32
             },
-            _pad_pc0: 0,
+            enable_llb_flag: cfg
+                .photonic
+                .thermal
+                .as_ref()
+                .map_or(0, |t| if t.enable_llb { 1 } else { 0 }),
             _pad_pc1: 0,
             _pad_pc2: 0,
             // Amplitudes start at 0; host writes them per step from envelope
