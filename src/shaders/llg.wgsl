@@ -52,6 +52,28 @@ struct Params {
     b_ext_y: f32,
     b_ext_z: f32,
     _pad_ext: f32,
+
+    // Exchange bias from AFM substrate (Phase 2)
+    b_bias_x: f32,
+    b_bias_y: f32,
+    b_bias_z: f32,
+    _pad_bias: f32,
+
+    // Interfacial (Rashba) DMI prefactor (Phase 3): D / (Ms·dx) [T per unit neighbor difference]
+    dmi_pf: f32,
+    _pad_dmi0: f32,
+    _pad_dmi1: f32,
+    _pad_dmi2: f32,
+
+    // Slonczewski SOT (Phase 4): current-driven torque from heavy-metal substrate
+    sot_tau_dl: f32,      // damping-like torque effective field [T]
+    sot_tau_fl: f32,      // field-like torque effective field [T]
+    _pad_sot0: f32,
+    _pad_sot1: f32,
+    sigma_x: f32,         // spin polarization direction (unit vector)
+    sigma_y: f32,
+    sigma_z: f32,
+    _pad_sigma: f32,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -120,15 +142,66 @@ fn zeeman_field() -> vec3<f32> {
     return vec3<f32>(params.b_ext_x, params.b_ext_y, params.b_ext_z);
 }
 
-// LLG torque in Landau-Lifshitz form:
-//   dm/dt = -γ'(m × B) - γ'α(m × (m × B))
-// where γ' = γ/(1+α²). The LLG torque is strictly perpendicular to m
-// in the continuous equation, so |m| is conserved. Discrete integration
-// introduces O(dt²) growth in |m|, corrected by post-step normalize in
-// heun_predict/heun_correct. The pitchfork stabilization term from the
-// 2025 Peiris paper is not needed here because normalize is active;
-// stab_coeff is retained in Params for future use if normalize is
-// removed in favor of smooth stabilization (better for adaptive solvers).
+// Substrate-pinned exchange bias field (Phase 2).
+// Contributed by antiferromagnetic substrates (IrMn, CoO) that pin the
+// ferromagnet via interfacial exchange coupling. Acts as an additional
+// uniform Zeeman-like term along a fixed direction set by the substrate's
+// field-cooling history.
+fn exchange_bias_field() -> vec3<f32> {
+    return vec3<f32>(params.b_bias_x, params.b_bias_y, params.b_bias_z);
+}
+
+// Interfacial (Rashba) DMI field (Phase 3) — from mag buffer.
+// Energy (Thiaville 2012 convention, standard in micromagnetics literature):
+//   e_DMI = D · [m_x·∂m_z/∂x + m_y·∂m_z/∂y - m_z·∂m_x/∂x - m_z·∂m_y/∂y]
+// Derived effective field (δE/δm → -B/Ms):
+//   B_DMI_x = -(2D/Ms)·∂m_z/∂x
+//   B_DMI_y = -(2D/Ms)·∂m_z/∂y
+//   B_DMI_z = +(2D/Ms)·(∂m_x/∂x + ∂m_y/∂y)
+// With this convention, positive D stabilizes OUTWARD-radial Néel skyrmions
+// (standard Pt/Co heavy-metal heterostructure chirality).
+// Central differences: ∂m/∂x ≈ (m[i+1] - m[i-1]) / (2·dx).
+// dmi_pf = D / (Ms·dx) absorbs the /(2·dx) from the stencil and the 2 from
+// the variational derivative — stencil returns raw (m[i+1] - m[i-1]).
+// Boundaries use the same clamping-Neumann treatment as exchange.
+fn dmi_from_mag(idx: u32) -> vec3<f32> {
+    let ix = i32(idx / params.ny);
+    let iy = i32(idx % params.ny);
+    let m_px = read_mag_at(ix + 1i, iy);
+    let m_mx = read_mag_at(ix - 1i, iy);
+    let m_py = read_mag_at(ix, iy + 1i);
+    let m_my = read_mag_at(ix, iy - 1i);
+    let dmz_dx = m_px.z - m_mx.z;
+    let dmz_dy = m_py.z - m_my.z;
+    let dmx_dx = m_px.x - m_mx.x;
+    let dmy_dy = m_py.y - m_my.y;
+    return params.dmi_pf * vec3<f32>(-dmz_dx, -dmz_dy, (dmx_dx + dmy_dy));
+}
+
+fn dmi_from_pred(idx: u32) -> vec3<f32> {
+    let ix = i32(idx / params.ny);
+    let iy = i32(idx % params.ny);
+    let m_px = read_pred_at(ix + 1i, iy);
+    let m_mx = read_pred_at(ix - 1i, iy);
+    let m_py = read_pred_at(ix, iy + 1i);
+    let m_my = read_pred_at(ix, iy - 1i);
+    let dmz_dx = m_px.z - m_mx.z;
+    let dmz_dy = m_py.z - m_my.z;
+    let dmx_dx = m_px.x - m_mx.x;
+    let dmy_dy = m_py.y - m_my.y;
+    return params.dmi_pf * vec3<f32>(-dmz_dx, -dmz_dy, (dmx_dx + dmy_dy));
+}
+
+// LLG torque in Landau-Lifshitz form with Slonczewski SOT (Phase 4):
+//   dm/dt = -γ'[(m × B) + α(m × (m × B))]
+//         - γ [τ_DL·m × (m × σ) + τ_FL·(m × σ)]
+// where γ' = γ/(1+α²). First line is the standard LLG precession + Gilbert
+// damping. Second line is spin-orbit torque: σ is the spin polarization
+// direction set by the charge current in the substrate (σ = ẑ × ĵ_c);
+// τ_DL is the damping-like effective field, τ_FL the field-like.
+//
+// SOT vanishes when τ_DL and τ_FL are zero (no current), reducing to pure LLG.
+// |m| is preserved by post-step normalize in heun_predict/heun_correct.
 fn llg_torque(m: vec3<f32>, b_eff: vec3<f32>) -> vec3<f32> {
     let a2 = params.alpha * params.alpha;
     let gp = params.gamma / (1.0 + a2);
@@ -136,7 +209,15 @@ fn llg_torque(m: vec3<f32>, b_eff: vec3<f32>) -> vec3<f32> {
     let mxb = cross(m, b_eff);
     let mxmxb = cross(m, mxb);
 
-    return -gp * (mxb + params.alpha * mxmxb);
+    var dmdt = -gp * (mxb + params.alpha * mxmxb);
+
+    // SOT contribution (Slonczewski form)
+    let sigma = vec3<f32>(params.sigma_x, params.sigma_y, params.sigma_z);
+    let mxs = cross(m, sigma);
+    let mxmxs = cross(m, mxs);
+    dmdt += -params.gamma * (params.sot_tau_dl * mxmxs + params.sot_tau_fl * mxs);
+
+    return dmdt;
 }
 
 // ─── Entry points ──────────────────────────────────────────────
@@ -148,7 +229,8 @@ fn field_torque_phase0(@builtin(global_invocation_id) gid: vec3<u32>) {
     if idx >= params.cell_count { return; }
 
     let m = read_mag(idx);
-    let b_eff = exchange_from_mag(idx) + anisotropy_field(m) + zeeman_field();
+    let b_eff = exchange_from_mag(idx) + anisotropy_field(m)
+              + zeeman_field() + exchange_bias_field() + dmi_from_mag(idx);
     let t = llg_torque(m, b_eff);
 
     let base = idx * 4u;
@@ -163,7 +245,8 @@ fn field_torque_phase1(@builtin(global_invocation_id) gid: vec3<u32>) {
     if idx >= params.cell_count { return; }
 
     let m = read_pred(idx);
-    let b_eff = exchange_from_pred(idx) + anisotropy_field(m) + zeeman_field();
+    let b_eff = exchange_from_pred(idx) + anisotropy_field(m)
+              + zeeman_field() + exchange_bias_field() + dmi_from_pred(idx);
     let t = llg_torque(m, b_eff);
 
     let base = idx * 4u;

@@ -73,6 +73,9 @@ pub struct SimConfig {
     pub u_axis: [f64; 3],
     /// Pitchfork stabilization coefficient [1/s] — dormant (see llg.wgsl)
     pub stab_coeff: f64,
+    /// Charge current density [A/m²], flowing in the substrate plane.
+    /// σ = ẑ × ĵ_c sets the spin polarization direction for SOT (Phase 4).
+    pub j_current: [f64; 3],
 
     pub readback_interval: usize,
     pub total_steps: usize,
@@ -80,17 +83,21 @@ pub struct SimConfig {
 }
 
 impl SimConfig {
-    /// Default FGT (effective parameters, Garland 2026) on vacuum substrate.
-    /// Reproduces pre-Phase-1 behavior for regression comparisons.
+    /// Default FGT: bulk single-crystal parameters (Leon-Brito 2016) on
+    /// a vacuum substrate — a physically honest "isolated FGT monolayer"
+    /// baseline. Previously this used Garland 2026 effective values, which
+    /// silently baked in substrate effects; see docs/plan.md §0.
+    /// For the legacy Garland-effective regime, use BulkMaterial::fgt_effective().
     pub fn fgt_default(nx: u32, ny: u32) -> Self {
         Self {
-            bulk: BulkMaterial::fgt_effective(),
+            bulk: BulkMaterial::fgt_bulk(),
             substrate: Substrate::vacuum(),
             geometry: Geometry::thin_2d(nx, ny),
             dt: 1.0e-13,
             b_ext: [0.0, 0.0, 0.0],
             u_axis: [0.0, 0.0, 1.0],
             stab_coeff: 1.0e11,
+            j_current: [0.0, 0.0, 0.0],
             readback_interval: 100,
             total_steps: 10_000,
             probe_idx: None,

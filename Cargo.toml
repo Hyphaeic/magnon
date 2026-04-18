@@ -18,6 +18,10 @@ name = "magnonic-dashboard"
 path = "src/bin/dashboard.rs"
 required-features = ["gui"]
 
+[[bin]]
+name = "magnonic-sweep"
+path = "src/bin/sweep.rs"
+
 [features]
 default = []
 gui = ["dep:minifb"]
@@ -30,6 +34,7 @@ pollster = "0.4"
 env_logger = "0.11"
 log = "0.4"
 rand = "0.8"
+rustfft = "6"
 
 # GUI (optional)
 minifb = { version = "0.27", optional = true }

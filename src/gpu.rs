@@ -9,35 +9,66 @@ use crate::config::SimConfig;
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct GpuParams {
+    // 0-15: grid
     nx: u32,
     ny: u32,
     cell_count: u32,
     _pad_grid: u32,
 
+    // 16-31: time/dynamics
     dt: f32,
     gamma: f32,
     alpha: f32,
     stab_coeff: f32,
 
+    // 32-47: material prefactors
     exchange_pf: f32,
     anisotropy_pf: f32,
     _pad_mat0: f32,
     _pad_mat1: f32,
 
+    // 48-63: anisotropy axis
     u_axis_x: f32,
     u_axis_y: f32,
     u_axis_z: f32,
     _pad_axis: f32,
 
+    // 64-79: external field (Zeeman)
     b_ext_x: f32,
     b_ext_y: f32,
     b_ext_z: f32,
     _pad_ext: f32,
+
+    // 80-95: exchange bias (Phase 2 — substrate-pinned effective field)
+    b_bias_x: f32,
+    b_bias_y: f32,
+    b_bias_z: f32,
+    _pad_bias: f32,
+
+    // 96-111: interfacial DMI (Phase 3 — Rashba-type from broken symmetry)
+    dmi_pf: f32,
+    _pad_dmi0: f32,
+    _pad_dmi1: f32,
+    _pad_dmi2: f32,
+
+    // 112-127: SOT torque strengths (Phase 4 — current-driven Slonczewski)
+    sot_tau_dl: f32,
+    sot_tau_fl: f32,
+    _pad_sot0: f32,
+    _pad_sot1: f32,
+
+    // 128-143: SOT spin polarization direction σ = ẑ × ĵ_c (unit vector)
+    sigma_x: f32,
+    sigma_y: f32,
+    sigma_z: f32,
+    _pad_sigma: f32,
 }
 
 impl GpuParams {
     fn from_config(cfg: &SimConfig) -> Self {
         let eff = cfg.effective();
+        let (sot_tau_dl, sot_tau_fl, sigma) =
+            eff.sot_coefficients(cfg.j_current, cfg.geometry.thickness);
 
         // Enforce unit anisotropy axis — the shader applies it directly
         // as û in (m·û)û without normalizing. A non-unit axis would
@@ -73,6 +104,22 @@ impl GpuParams {
             b_ext_y: cfg.b_ext[1] as f32,
             b_ext_z: cfg.b_ext[2] as f32,
             _pad_ext: 0.0,
+            b_bias_x: eff.b_bias[0] as f32,
+            b_bias_y: eff.b_bias[1] as f32,
+            b_bias_z: eff.b_bias[2] as f32,
+            _pad_bias: 0.0,
+            dmi_pf: eff.dmi_prefactor(cfg.geometry.cell_size) as f32,
+            _pad_dmi0: 0.0,
+            _pad_dmi1: 0.0,
+            _pad_dmi2: 0.0,
+            sot_tau_dl: sot_tau_dl as f32,
+            sot_tau_fl: sot_tau_fl as f32,
+            _pad_sot0: 0.0,
+            _pad_sot1: 0.0,
+            sigma_x: sigma[0] as f32,
+            sigma_y: sigma[1] as f32,
+            sigma_z: sigma[2] as f32,
+            _pad_sigma: 0.0,
         }
     }
 }
@@ -432,6 +479,33 @@ impl GpuSolver {
         self.queue.write_buffer(&self.params_buf, 64, bytemuck::cast_slice(&data));
     }
 
+    /// Update exchange bias field at runtime (substrate-pinned reference direction).
+    pub fn set_b_bias(&self, bx: f32, by: f32, bz: f32) {
+        // b_bias starts at byte offset 80 in GpuParams (5th vec4)
+        let data = [bx, by, bz, 0.0f32];
+        self.queue.write_buffer(&self.params_buf, 80, bytemuck::cast_slice(&data));
+    }
+
+    /// Update DMI prefactor at runtime.
+    pub fn set_dmi_pf(&self, pf: f32) {
+        // dmi_pf at byte offset 96 (6th vec4, first slot)
+        self.queue.write_buffer(&self.params_buf, 96, bytemuck::bytes_of(&pf));
+    }
+
+    /// Update SOT torque strengths at runtime. σ is left unchanged.
+    pub fn set_sot(&self, tau_dl: f32, tau_fl: f32) {
+        // sot_tau_dl at byte offset 112, sot_tau_fl at 116
+        let data = [tau_dl, tau_fl];
+        self.queue.write_buffer(&self.params_buf, 112, bytemuck::cast_slice(&data));
+    }
+
+    /// Update SOT spin polarization direction σ at runtime.
+    pub fn set_sigma(&self, sx: f32, sy: f32, sz: f32) {
+        // sigma at byte offset 128 (8th vec4)
+        let data = [sx, sy, sz, 0.0f32];
+        self.queue.write_buffer(&self.params_buf, 128, bytemuck::cast_slice(&data));
+    }
+
     /// Update damping parameter at runtime.
     pub fn set_alpha(&self, alpha: f32) {
         // alpha is at byte offset 24 (6th f32)
@@ -475,6 +549,46 @@ impl GpuSolver {
                     break;
                 }
             }
+        }
+        self.queue.write_buffer(&self.mag_buf, 0, bytemuck::cast_slice(&data));
+        self.step = 0;
+    }
+
+    /// Re-upload magnetization: Néel skyrmion seeded at the grid center.
+    /// Profile: θ(r) = 2·atan(R/r) with m_z(0) = -1 (core) and m_z(∞) → +1 (background).
+    /// In-plane orientation is OUTWARD radial — the Néel chirality stabilized by
+    /// positive D under the standard Thiaville 2012 convention used in llg.wgsl.
+    /// With no DMI the skyrmion collapses; with D above the critical value it
+    /// stabilizes as a metastable soliton.
+    pub fn reset_skyrmion_seed(&mut self, radius_nm: f64) {
+        let n = self.cell_count as usize;
+        let ny = self.config.geometry.ny;
+        let dx = self.config.geometry.cell_size;
+        let r0 = radius_nm * 1e-9;
+        let cx = self.config.geometry.nx as f64 * dx * 0.5;
+        let cy = ny as f64 * dx * 0.5;
+        let mut data = vec![0.0f32; n * 4];
+        for i in 0..n {
+            let ix = (i as u32) / ny;
+            let iy = (i as u32) % ny;
+            let x = (ix as f64 + 0.5) * dx - cx;
+            let y = (iy as f64 + 0.5) * dx - cy;
+            let r = (x * x + y * y).sqrt();
+            let theta = if r < 1e-20 {
+                std::f64::consts::PI
+            } else {
+                2.0 * (r0 / r).atan()
+            };
+            let phi = y.atan2(x);
+            let mz = theta.cos();
+            let ms = theta.sin();
+            // Outward-radial Néel skyrmion — stable chirality for D > 0 under
+            // Thiaville convention
+            let mx = ms * phi.cos();
+            let my = ms * phi.sin();
+            data[i * 4] = mx as f32;
+            data[i * 4 + 1] = my as f32;
+            data[i * 4 + 2] = mz as f32;
         }
         self.queue.write_buffer(&self.mag_buf, 0, bytemuck::cast_slice(&data));
         self.step = 0;

@@ -1,0 +1,265 @@
+//! Parametric sweep harness — iterates over (material × substrate × thickness × conditions),
+//! runs a standard pulse-and-measure protocol per design point, emits CSV for phase-diagram analysis.
+//!
+//! Measurement protocol per point:
+//!   1. Relax initial state for N_relax steps (let system find equilibrium).
+//!   2. Apply a transverse B_x pulse for N_pulse steps to excite precession.
+//!   3. Sample probe_mz every M steps for (M × N_sample) steps of free decay.
+//!   4. FFT the samples to extract peak frequency, envelope-fit for decay τ.
+//!
+//! Output rows: physical design choices + derived effective params + clock metrics.
+
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::time::Instant;
+
+use magnonic_clock_sim::config::{Geometry, SimConfig};
+use magnonic_clock_sim::gpu::GpuSolver;
+use magnonic_clock_sim::material::BulkMaterial;
+use magnonic_clock_sim::metrics::{analyze_time_series, ClockMetrics};
+use magnonic_clock_sim::substrate::Substrate;
+
+struct SweepArgs {
+    materials: Vec<String>,
+    substrates: Vec<String>,
+    thicknesses_nm: Vec<f64>,
+    bz_values: Vec<f64>,
+    jx_values: Vec<f64>,
+
+    nx: u32,
+    ny: u32,
+    cell_size_nm: f64,
+    dt_ps: f64,
+
+    // Protocol
+    relax_steps: usize,
+    pulse_strength_t: f32,
+    pulse_duration_steps: usize,
+    sample_interval_steps: usize,
+    num_samples: usize,
+
+    output_path: String,
+}
+
+impl Default for SweepArgs {
+    fn default() -> Self {
+        Self {
+            materials: vec!["fgt-bulk".to_string(), "fgt-effective".to_string()],
+            substrates: vec!["vacuum".to_string(), "pt".to_string(), "wte2".to_string(), "yig".to_string()],
+            thicknesses_nm: vec![0.7, 2.1],
+            bz_values: vec![0.0],
+            jx_values: vec![0.0],
+            nx: 32,
+            ny: 32,
+            cell_size_nm: 2.5,
+            dt_ps: 0.1,
+            relax_steps: 5000,
+            pulse_strength_t: 1.0,
+            pulse_duration_steps: 100,
+            sample_interval_steps: 20,
+            num_samples: 1024,
+            output_path: "sweep.csv".to_string(),
+        }
+    }
+}
+
+fn parse_list_f64(s: &str) -> Vec<f64> {
+    s.split(',')
+        .filter_map(|x| x.trim().parse().ok())
+        .collect()
+}
+
+fn parse_list_str(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|x| x.trim().to_string())
+        .filter(|x| !x.is_empty())
+        .collect()
+}
+
+fn parse_args() -> SweepArgs {
+    let mut args = SweepArgs::default();
+    let raw: Vec<String> = std::env::args().collect();
+    let mut i = 1;
+    while i < raw.len() {
+        match raw[i].as_str() {
+            "--materials" => { args.materials = parse_list_str(&raw[i + 1]); i += 2; }
+            "--substrates" => { args.substrates = parse_list_str(&raw[i + 1]); i += 2; }
+            "--thicknesses" => { args.thicknesses_nm = parse_list_f64(&raw[i + 1]); i += 2; }
+            "--bz-values" => { args.bz_values = parse_list_f64(&raw[i + 1]); i += 2; }
+            "--jx-values" => { args.jx_values = parse_list_f64(&raw[i + 1]); i += 2; }
+            "--nx" => { args.nx = raw[i + 1].parse().unwrap(); i += 2; }
+            "--ny" => { args.ny = raw[i + 1].parse().unwrap(); i += 2; }
+            "--cell-size" => { args.cell_size_nm = raw[i + 1].parse().unwrap(); i += 2; }
+            "--dt-ps" => { args.dt_ps = raw[i + 1].parse().unwrap(); i += 2; }
+            "--relax-steps" => { args.relax_steps = raw[i + 1].parse().unwrap(); i += 2; }
+            "--pulse" => { args.pulse_strength_t = raw[i + 1].parse().unwrap(); i += 2; }
+            "--pulse-steps" => { args.pulse_duration_steps = raw[i + 1].parse().unwrap(); i += 2; }
+            "--sample-interval" => { args.sample_interval_steps = raw[i + 1].parse().unwrap(); i += 2; }
+            "--num-samples" => { args.num_samples = raw[i + 1].parse().unwrap(); i += 2; }
+            "--output" | "-o" => { args.output_path = raw[i + 1].clone(); i += 2; }
+            "--help" | "-h" => { print_help(); std::process::exit(0); }
+            other => {
+                eprintln!("Unknown arg: {other}");
+                print_help();
+                std::process::exit(1);
+            }
+        }
+    }
+    args
+}
+
+fn print_help() {
+    eprintln!("magnonic-sweep — parametric sweep harness");
+    eprintln!();
+    eprintln!("Design axes (comma-separated lists):");
+    eprintln!("  --materials M1,M2,...       Bulk material names (default: fgt-bulk,fgt-effective)");
+    eprintln!("  --substrates S1,S2,...      Substrate names (default: vacuum,pt,wte2,yig)");
+    eprintln!("  --thicknesses T1,T2,...     Film thicknesses [nm] (default: 0.7,2.1)");
+    eprintln!("  --bz-values B1,B2,...       External field z [T] (default: 0.0)");
+    eprintln!("  --jx-values J1,J2,...       Current density along x [A/m²] (default: 0.0)");
+    eprintln!();
+    eprintln!("Geometry:");
+    eprintln!("  --nx / --ny N               Grid (default 32)");
+    eprintln!("  --cell-size F               Cell size [nm] (default 2.5)");
+    eprintln!("  --dt-ps F                   Timestep [ps] (default 0.1)");
+    eprintln!();
+    eprintln!("Measurement protocol:");
+    eprintln!("  --relax-steps N             Equilibration steps (default 5000)");
+    eprintln!("  --pulse F                   Transverse Bx pulse amplitude [T] (default 1.0)");
+    eprintln!("  --pulse-steps N             Pulse duration [steps] (default 100)");
+    eprintln!("  --sample-interval N         Steps between probe samples (default 20)");
+    eprintln!("  --num-samples N             Samples recorded after pulse (default 1024)");
+    eprintln!();
+    eprintln!("Output:");
+    eprintln!("  --output PATH / -o PATH     CSV output path (default sweep.csv)");
+}
+
+fn run_design_point(config: &SimConfig, args: &SweepArgs) -> Result<ClockMetrics, String> {
+    let mut solver = GpuSolver::new(config)?;
+    let bz_f32 = config.b_ext[2] as f32;
+
+    // 1. Relax
+    solver.step_n(args.relax_steps);
+
+    // 2. Pulse: apply transverse Bx, run for N_pulse steps, then turn off
+    solver.set_b_ext(args.pulse_strength_t, 0.0, bz_f32);
+    solver.step_n(args.pulse_duration_steps);
+    solver.set_b_ext(0.0, 0.0, bz_f32);
+
+    // 3. Record avg_mx during free decay — transverse component swings fully
+    // during precession (unlike mz which stays near ±1 for shallow cones).
+    let mut samples = Vec::with_capacity(args.num_samples);
+    for _ in 0..args.num_samples {
+        solver.step_n(args.sample_interval_steps);
+        samples.push(solver.observables().avg_mx);
+    }
+
+    // 4. Analyze
+    let dt_sample_s = config.dt * args.sample_interval_steps as f64;
+    Ok(analyze_time_series(&samples, dt_sample_s))
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env_logger::init();
+    let args = parse_args();
+
+    let total = args.materials.len()
+        * args.substrates.len()
+        * args.thicknesses_nm.len()
+        * args.bz_values.len()
+        * args.jx_values.len();
+    eprintln!("Sweep: {} design points", total);
+    eprintln!("  Materials:   {:?}", args.materials);
+    eprintln!("  Substrates:  {:?}", args.substrates);
+    eprintln!("  Thicknesses: {:?} nm", args.thicknesses_nm);
+    eprintln!("  Bz values:   {:?} T", args.bz_values);
+    eprintln!("  Jx values:   {:?} A/m²", args.jx_values);
+    eprintln!();
+
+    let file = File::create(&args.output_path)?;
+    let mut out = BufWriter::new(file);
+
+    writeln!(
+        out,
+        "material,substrate,thickness_nm,ms_eff,a_eff,k_u_eff,alpha_eff,d_dmi_eff,bz_T,jx_A_per_m2,\
+         freq_GHz,freq_width_GHz,q_factor,decay_time_ns,final_value,late_amplitude,dt_sample_ps"
+    )?;
+
+    let t_start = Instant::now();
+    let mut idx = 0;
+
+    for m_name in &args.materials {
+        let Some(bulk) = BulkMaterial::lookup(m_name) else {
+            eprintln!("!! Unknown material {m_name}, skipping");
+            continue;
+        };
+        for s_name in &args.substrates {
+            let Some(substrate) = Substrate::lookup(s_name) else {
+                eprintln!("!! Unknown substrate {s_name}, skipping");
+                continue;
+            };
+            for &t_nm in &args.thicknesses_nm {
+                for &bz in &args.bz_values {
+                    for &jx in &args.jx_values {
+                        idx += 1;
+
+                        let config = SimConfig {
+                            bulk: bulk.clone(),
+                            substrate: substrate.clone(),
+                            geometry: Geometry {
+                                thickness: t_nm * 1e-9,
+                                cell_size: args.cell_size_nm * 1e-9,
+                                nx: args.nx,
+                                ny: args.ny,
+                            },
+                            dt: args.dt_ps * 1e-12,
+                            b_ext: [0.0, 0.0, bz],
+                            u_axis: [0.0, 0.0, 1.0],
+                            stab_coeff: 1.0e11,
+                            j_current: [jx, 0.0, 0.0],
+                            readback_interval: 100,
+                            total_steps: 0,
+                            probe_idx: None,
+                        };
+
+                        let eff = config.effective();
+                        let t0 = Instant::now();
+                        let result = run_design_point(&config, &args);
+                        let dt_pt = t0.elapsed().as_secs_f64();
+
+                        match result {
+                            Ok(m) => {
+                                writeln!(
+                                    out,
+                                    "{m_name},{s_name},{t_nm},{:.4e},{:.4e},{:.4e},{:.5},{:.4e},{bz},{jx:.3e},\
+                                     {:.4},{:.4},{:.3e},{:.4e},{:.6},{:.4e},{:.3}",
+                                    eff.ms, eff.a_ex, eff.k_u, eff.alpha, eff.d_dmi,
+                                    m.freq_ghz, m.freq_width_ghz, m.q_factor,
+                                    m.decay_time_ns, m.final_value, m.late_amplitude,
+                                    m.dt_sample_ps,
+                                )?;
+                                out.flush()?;
+                                eprintln!(
+                                    "[{idx}/{total}] {m_name}+{s_name}@{t_nm}nm Bz={bz:.2} Jx={jx:.1e} \
+                                     → f={:.2}GHz Q={:.1} τ={:.2}ns  ({:.1}s)",
+                                    m.freq_ghz, m.q_factor, m.decay_time_ns, dt_pt,
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!("[{idx}/{total}] {m_name}+{s_name}@{t_nm}nm FAILED: {e}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let total_elapsed = t_start.elapsed().as_secs_f64();
+    eprintln!();
+    eprintln!("Sweep complete: {idx} points in {total_elapsed:.1}s ({:.2}s/point avg)",
+              total_elapsed / (idx as f64).max(1.0));
+    eprintln!("CSV: {}", args.output_path);
+
+    Ok(())
+}

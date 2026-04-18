@@ -107,6 +107,7 @@ fn main() {
     eprintln!("║  R         Reset: random magnetization    ║");
     eprintln!("║  D         Reset: stripe domains          ║");
     eprintln!("║  U         Reset: uniform +z              ║");
+    eprintln!("║  S         Reset: Néel skyrmion seed      ║");
     eprintln!("║  C         Clear plot history             ║");
     eprintln!("║  Escape    Quit                           ║");
     eprintln!("╚══════════════════════════════════════════╝");
@@ -183,6 +184,16 @@ fn main() {
             solver.reset_uniform_z();
             mag_data = solver.readback_mag();
             eprintln!("RESET: uniform +z");
+        }
+        if window.is_key_pressed(Key::S, KeyRepeat::No) {
+            // Skyrmion radius ≈ 1/6 of smaller grid dimension
+            let nx_f = config.geometry.nx as f64;
+            let ny_f = config.geometry.ny as f64;
+            let dx_nm = config.geometry.cell_size * 1e9;
+            let r_nm = dx_nm * nx_f.min(ny_f) / 6.0;
+            solver.reset_skyrmion_seed(r_nm);
+            mag_data = solver.readback_mag();
+            eprintln!("RESET: Néel skyrmion seed, R ≈ {r_nm:.1} nm");
         }
         if window.is_key_pressed(Key::C, KeyRepeat::No) {
             mz_hist.clear();

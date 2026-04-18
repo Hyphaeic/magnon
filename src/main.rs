@@ -82,9 +82,32 @@ fn main() {
                 config.bulk.ms_bulk = args[i + 1].parse().unwrap();
                 i += 2;
             }
+            "--init" => {
+                // set later via solver.reset_*(); for now just stash
+                std::env::set_var("MAGNONIC_INIT", &args[i + 1]);
+                i += 2;
+            }
+            "--skyrmion-radius" => {
+                std::env::set_var("MAGNONIC_SKYRMION_R_NM", &args[i + 1]);
+                i += 2;
+            }
+            "--d-dmi" => {
+                // Override substrate DMI (J/m²) — useful for sweeps
+                let d: f64 = args[i + 1].parse().unwrap();
+                config.substrate.d_dmi_surface = d;
+                i += 2;
+            }
             "--bx" => { config.b_ext[0] = args[i + 1].parse().unwrap(); i += 2; }
             "--by" => { config.b_ext[1] = args[i + 1].parse().unwrap(); i += 2; }
             "--bz" => { config.b_ext[2] = args[i + 1].parse().unwrap(); i += 2; }
+            "--jx" => { config.j_current[0] = args[i + 1].parse().unwrap(); i += 2; }
+            "--jy" => { config.j_current[1] = args[i + 1].parse().unwrap(); i += 2; }
+            "--jz" => { config.j_current[2] = args[i + 1].parse().unwrap(); i += 2; }
+            "--theta-sh" => {
+                // Override substrate spin Hall angle
+                config.substrate.spin_hall_angle = args[i + 1].parse().unwrap();
+                i += 2;
+            }
             "--dt" => { config.dt = args[i + 1].parse().unwrap(); i += 2; }
             "--help" | "-h" => {
                 eprintln!("magnonic-sim [options]");
@@ -123,8 +146,27 @@ fn main() {
     }
 
     config.print_summary();
+    config.effective().print_sot(config.j_current, config.geometry.thickness);
 
     let mut solver = GpuSolver::new(&config).expect("Failed to initialize GPU solver");
+
+    // Handle --init flag
+    if let Ok(init_mode) = std::env::var("MAGNONIC_INIT") {
+        match init_mode.as_str() {
+            "random" => { solver.reset_random(); eprintln!("INIT: random unit vectors"); }
+            "stripe" => { solver.reset_stripe_domains(8); eprintln!("INIT: stripe domains"); }
+            "uniform" => { solver.reset_uniform_z(); eprintln!("INIT: uniform +z + 5° cone"); }
+            "skyrmion" => {
+                let default_r = (config.geometry.nx.min(config.geometry.ny) as f64)
+                    * config.geometry.cell_size * 1e9 / 6.0;
+                let r_nm: f64 = std::env::var("MAGNONIC_SKYRMION_R_NM")
+                    .ok().and_then(|s| s.parse().ok()).unwrap_or(default_r);
+                solver.reset_skyrmion_seed(r_nm);
+                eprintln!("INIT: Néel skyrmion seed, R = {r_nm:.1} nm");
+            }
+            other => { eprintln!("Unknown --init mode: {other}"); std::process::exit(1); }
+        }
+    }
 
     println!("step,time_ps,avg_mx,avg_my,avg_mz,min_norm,max_norm,probe_mz");
 

@@ -119,11 +119,13 @@ impl BulkMaterial {
     }
 
     /// Look up a material by command-line name (accepts common aliases).
+    /// `--material fgt` now maps to the honest Leon-Brito bulk values.
+    /// For the Garland 2026 effective preset, use `--material fgt-effective`.
     pub fn lookup(name: &str) -> Option<Self> {
         let n = name.to_lowercase();
         match n.as_str() {
-            "fgt" | "fgt-effective" => Some(Self::fgt_effective()),
-            "fgt-bulk" => Some(Self::fgt_bulk()),
+            "fgt" | "fgt-bulk" => Some(Self::fgt_bulk()),
+            "fgt-effective" | "fgt-garland" => Some(Self::fgt_effective()),
             "fga-te2" | "fga-te2-bulk" | "fe3gate2" => Some(Self::fga_te2_bulk()),
             "cri3" | "cri3-bulk" => Some(Self::cri3_bulk()),
             "cofeb" | "cofeb-bulk" => Some(Self::cofeb_bulk()),
@@ -135,8 +137,8 @@ impl BulkMaterial {
     /// Library of all available bulk materials.
     pub fn list_all() -> Vec<Self> {
         vec![
-            Self::fgt_effective(),
             Self::fgt_bulk(),
+            Self::fgt_effective(),
             Self::fga_te2_bulk(),
             Self::cri3_bulk(),
             Self::cofeb_bulk(),
