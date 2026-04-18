@@ -27,6 +27,7 @@ pub fn for_key(key: &str) -> Option<LayerThermalParams> {
         "ni" | "ni-m3tm" => Some(ni_m3tm()),
         "py" | "permalloy" | "permalloy-m3tm" => Some(py_m3tm()),
         "fgt" | "fgt-ni-surrogate" | "fgt-surrogate" => Some(fgt_ni_surrogate()),
+        "fgt-zhou" | "fgt-calibrated" => Some(fgt_zhou_calibrated()),
         "yig" | "yig-inert" => Some(yig_inert()),
         "cofeb" | "cofeb-m3tm" => Some(cofeb_m3tm()),
         _ => None,
@@ -124,6 +125,32 @@ pub fn yig_inert() -> LayerThermalParams {
         tau_long_base: 0.3e-15,
         notes: "YIG inert — insulator, M3TM source effectively zero.",
     }
+}
+
+/// FGT — **Zhou 2025 morphology-calibrated** (not a literal reproduction).
+///
+/// Derived from `fgt_ni_surrogate` with two parameters tuned against Zhou et
+/// al. *Natl. Sci. Rev.* 12, nwaf185 (2025) *aggregate morphology* at
+/// T = 150 K, B_z = 1 T, F = 0.24 mJ/cm², 150 fs pulse on a 5 nm flake.
+/// See `docs/zhou_fgt_calibration.md` and ADR-005 for the full set of
+/// assumptions — including the temperature shift from Zhou's T = T_c = 210 K
+/// to T = 150 K (our zero-field tables make T = T_c degenerate).
+///
+/// Fit numbers (best-fit grid point from `examples/test_zhou_fgt_calibrate.rs`):
+///   demag fraction = 86.5 % (Zhou target 79 %)
+///   recovery fraction at 22 ps = 60.1 % (Zhou target ≈ 55 %)
+///
+/// Use this preset only with reflectivity = 0.50 applied on the pulse spec.
+pub fn fgt_zhou_calibrated() -> LayerThermalParams {
+    let mut p = fgt_ni_surrogate();
+    p.t_c = 210.0;
+    let (m_e, chi) = brillouin_tables_spin_half(p.t_c, p.llb_table_n);
+    p.m_e_table = m_e;
+    p.chi_par_table = chi;
+    p.tau_long_base = 3.0e-15;
+    p.g_sub_phonon = 2.0e17;
+    p.notes = "FGT Zhou 2025 morphology fit at T=150K B=1T (see docs/zhou_fgt_calibration.md + ADR-005). NOT a literal T_c reproduction.";
+    p
 }
 
 /// CoFeB — Sato 2018 PRB 97, 014433 (β=1.73).
