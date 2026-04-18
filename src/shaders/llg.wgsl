@@ -27,7 +27,7 @@ struct Params {
     dt: f32,
     gamma: f32,
     stab_coeff: f32,
-    _pad_dyn: f32,
+    cell_size_m: f32,  // in-plane cell size [m]; used in Phase P2 for pulse spatial profile
 
     b_ext: vec4<f32>,
 
@@ -51,6 +51,17 @@ struct Params {
     layer_u_axes: array<vec4<f32>, 4>,
     layer_b_biases: array<vec4<f32>, 4>,
     layer_sigmas: array<vec4<f32>, 4>,
+
+    // Phase P2 — per-pulse photonic uniforms. Supersedes P1's single b_laser.
+    // Up to 4 active pulses, each with independent amplitude (time-dependent,
+    // host-updated per step), spot center + σ_r (static), and direction.
+    pulse_count: u32,
+    _pad_pc0: u32,
+    _pad_pc1: u32,
+    _pad_pc2: u32,
+    pulse_amplitudes: vec4<f32>,                      // [T], packed 4 pulses
+    pulse_spot_centers: array<vec4<f32>, 4>,           // (x, y, σ_r, _pad) meters
+    pulse_directions: array<vec4<f32>, 4>,             // unit vec3 + pad
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -174,6 +185,38 @@ fn zeeman_field() -> vec3<f32> {
     return params.b_ext.xyz;
 }
 
+// Phase P2 — photonic drive at a specific in-plane cell (ix, iy).
+// Sums Gaussian-weighted contributions from all active pulses.
+// Each pulse contributes: amp · weight(r) · direction
+//   where weight(r) = exp(-r²/(2σ²))  for σ > 0,  or 1.0 for σ = 0 (uniform).
+// When params.pulse_count == 0 (no photonic drive) the loop returns vec3(0).
+fn laser_field_at(idx: u32) -> vec3<f32> {
+    let in_plane_idx = idx % in_plane_count();
+    let ix = in_plane_idx / params.ny;
+    let iy = in_plane_idx % params.ny;
+    let x = (f32(ix) + 0.5) * params.cell_size_m;
+    let y = (f32(iy) + 0.5) * params.cell_size_m;
+
+    var total = vec3<f32>(0.0, 0.0, 0.0);
+    for (var p: u32 = 0u; p < params.pulse_count; p = p + 1u) {
+        let center = params.pulse_spot_centers[p];   // (x, y, σ, _)
+        let dir = params.pulse_directions[p].xyz;
+        let amp = params.pulse_amplitudes[p];
+
+        var weight: f32 = 1.0;
+        let sigma = center.z;
+        if sigma > 0.0 {
+            let dx = x - center.x;
+            let dy = y - center.y;
+            let r2 = dx * dx + dy * dy;
+            weight = exp(-r2 / (2.0 * sigma * sigma));
+        }
+
+        total = total + (amp * weight * dir);
+    }
+    return total;
+}
+
 fn exchange_bias_field(iz: u32) -> vec3<f32> {
     return params.layer_b_biases[iz].xyz;
 }
@@ -241,7 +284,7 @@ fn field_torque_phase0(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let m = read_mag(idx);
     let b_eff = exchange_from_mag(idx) + exchange_interlayer_from_mag(idx)
-              + anisotropy_field(m, iz) + zeeman_field()
+              + anisotropy_field(m, iz) + zeeman_field() + laser_field_at(idx)
               + exchange_bias_field(iz) + dmi_from_mag(idx);
     let t = llg_torque(m, b_eff, iz);
 
@@ -258,7 +301,7 @@ fn field_torque_phase1(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let m = read_pred(idx);
     let b_eff = exchange_from_pred(idx) + exchange_interlayer_from_pred(idx)
-              + anisotropy_field(m, iz) + zeeman_field()
+              + anisotropy_field(m, iz) + zeeman_field() + laser_field_at(idx)
               + exchange_bias_field(iz) + dmi_from_pred(idx);
     let t = llg_torque(m, b_eff, iz);
 

@@ -28,7 +28,9 @@ struct GpuParams {
     dt: f32,
     gamma: f32,
     stab_coeff: f32,
-    _pad_dyn: f32,
+    // cell_size in meters (in-plane dx = dy). Needed by the shader for
+    // computing cell positions during the per-pulse Gaussian-weight sum.
+    cell_size_m: f32,
 
     // 32-47: B_ext (global Zeeman, applies to all layers)
     b_ext: [f32; 4],
@@ -60,6 +62,31 @@ struct GpuParams {
     layer_b_biases: [[f32; 4]; MAX_LAYERS],
     // 320-383: per-layer SOT σ direction (4 × vec4)
     layer_sigmas: [[f32; 4]; MAX_LAYERS],
+
+    // ─── Phase P2 — per-pulse photonic uniforms ─────────────────────────
+    // Up to MAX_PULSES = 4 active pulses. Superseded the P1 single-b_laser
+    // field: now the shader computes per-cell B_laser as the Gaussian-
+    // weighted sum over all active pulses. Pulses with spot_sigma = 0 are
+    // treated as spatially uniform (P1-equivalent).
+
+    // 384-399: active pulse count + padding
+    pulse_count: u32,
+    _pad_pc0: u32,
+    _pad_pc1: u32,
+    _pad_pc2: u32,
+
+    // 400-415: per-pulse current-step amplitude [T], packed 4 pulses per vec4.
+    // Host rewrites per step from Gaussian temporal envelope.
+    pulse_amplitudes: [f32; 4],
+
+    // 416-479: per-pulse spot data (4 × vec4). Each entry is (x, y, σ_r, _pad)
+    // in meters. Spot is where the beam is centered in the grid; σ_r is the
+    // 1-σ radius. σ_r = 0 ⇒ spatially uniform pulse.
+    pulse_spot_centers: [[f32; 4]; 4],
+
+    // 480-543: per-pulse propagation direction (4 × vec4). Unit vectors;
+    // normalized on ingest. k̂ direction of IFE-induced B_eff.
+    pulse_directions: [[f32; 4]; 4],
 }
 
 impl GpuParams {
@@ -127,7 +154,7 @@ impl GpuParams {
             dt: cfg.dt as f32,
             gamma: gamma as f32,
             stab_coeff: cfg.stab_coeff as f32,
-            _pad_dyn: 0.0,
+            cell_size_m: cfg.geometry.cell_size as f32,
             b_ext: [cfg.b_ext[0] as f32, cfg.b_ext[1] as f32, cfg.b_ext[2] as f32, 0.0],
             layer_alphas,
             layer_exchange_pfs,
@@ -141,6 +168,40 @@ impl GpuParams {
             layer_u_axes,
             layer_b_biases,
             layer_sigmas,
+            // Photonic P2 — populate per-pulse uniforms
+            pulse_count: {
+                let n = cfg.photonic.pulses.len();
+                if n > 4 {
+                    eprintln!(
+                        "WARNING: {n} pulses specified but MAX_PULSES = 4; ignoring extras",
+                    );
+                }
+                n.min(4) as u32
+            },
+            _pad_pc0: 0,
+            _pad_pc1: 0,
+            _pad_pc2: 0,
+            // Amplitudes start at 0; host writes them per step from envelope
+            pulse_amplitudes: [0.0; 4],
+            pulse_spot_centers: {
+                let mut centers = [[0.0f32; 4]; 4];
+                for (i, p) in cfg.photonic.pulses.iter().take(4).enumerate() {
+                    centers[i] = [
+                        p.spot_center[0] as f32,
+                        p.spot_center[1] as f32,
+                        p.spot_sigma as f32,
+                        0.0,
+                    ];
+                }
+                centers
+            },
+            pulse_directions: {
+                let mut dirs = [[0.0f32; 4]; 4];
+                for (i, p) in cfg.photonic.pulses.iter().take(4).enumerate() {
+                    dirs[i] = [p.direction[0], p.direction[1], p.direction[2], 0.0];
+                }
+                dirs
+            },
         }
     }
 }
@@ -388,11 +449,61 @@ impl GpuSolver {
         data
     }
 
-    /// Run N Heun steps in a single GPU submission.
+    /// Run N Heun steps.
+    ///
+    /// Two internal paths:
+    /// - **Fast batched path** (no photonic pulses): all N steps submitted in a
+    ///   single command buffer — ~13-15k steps/s on an RTX 4060.
+    /// - **Per-step path** (photonic.pulses non-empty): b_laser uniform is
+    ///   rewritten before each step with the Gaussian-envelope value at the
+    ///   step midpoint t_n + dt/2. Each step is its own submission. ~5× slower
+    ///   but necessary for time-dependent forcing.
+    ///
+    /// The midpoint-time approximation is O(dt²) in the pulse envelope — the
+    /// same order as Heun's truncation error — so it introduces no additional
+    /// accuracy loss for realistic pulses (fs-scale envelope, fs-scale dt).
     pub fn step_n(&mut self, n: usize) {
         let wg = self.workgroups;
-        let mut encoder = self.device.create_command_encoder(&Default::default());
-        for _ in 0..n {
+        let has_pulses = !self.config.photonic.is_empty();
+
+        if !has_pulses {
+            // Fast batched path — unchanged from pre-P1.
+            let mut encoder = self.device.create_command_encoder(&Default::default());
+            for _ in 0..n {
+                for pipeline in [
+                    &self.ft_phase0_pipeline,
+                    &self.predict_pipeline,
+                    &self.ft_phase1_pipeline,
+                    &self.correct_pipeline,
+                ] {
+                    let mut p = encoder.begin_compute_pass(&Default::default());
+                    p.set_pipeline(pipeline);
+                    p.set_bind_group(0, &self.bind_group, &[]);
+                    p.dispatch_workgroups(wg, 1, 1);
+                }
+            }
+            self.queue.submit(Some(encoder.finish()));
+            self.step += n;
+            return;
+        }
+
+        // Per-step path — update per-pulse amplitudes before each Heun step.
+        // Each pulse's time-envelope value is computed at the midpoint t_n + dt/2
+        // (O(dt²) accurate, matches Heun's truncation order). Spatial Gaussian
+        // weights are per-cell in the shader; they use the static spot_centers
+        // uniform set at config time.
+        let dt = self.config.dt;
+        let n_pulses = self.config.photonic.pulses.len().min(4);
+        for step_offset in 0..n {
+            let t_mid = (self.step + step_offset) as f64 * dt + 0.5 * dt;
+            let mut amps = [0.0f32; 4];
+            for (i, pulse) in self.config.photonic.pulses.iter().take(n_pulses).enumerate() {
+                amps[i] = (pulse.peak_field as f64 * pulse.envelope_at(t_mid)) as f32;
+            }
+            // pulse_amplitudes sits at offset 400 in GpuParams
+            self.queue.write_buffer(&self.params_buf, 400, bytemuck::cast_slice(&amps));
+
+            let mut encoder = self.device.create_command_encoder(&Default::default());
             for pipeline in [
                 &self.ft_phase0_pipeline,
                 &self.predict_pipeline,
@@ -404,8 +515,8 @@ impl GpuSolver {
                 p.set_bind_group(0, &self.bind_group, &[]);
                 p.dispatch_workgroups(wg, 1, 1);
             }
+            self.queue.submit(Some(encoder.finish()));
         }
-        self.queue.submit(Some(encoder.finish()));
         self.step += n;
     }
 
@@ -509,6 +620,16 @@ impl GpuSolver {
     pub fn set_interlayer_pfs(&self, below: [f32; 4], above: [f32; 4]) {
         self.queue.write_buffer(&self.params_buf, 160, bytemuck::cast_slice(&below));
         self.queue.write_buffer(&self.params_buf, 176, bytemuck::cast_slice(&above));
+    }
+
+    /// Override a single pulse's amplitude at runtime (Phase P2).
+    /// Useful for programmatic pulse control or debugging.
+    /// Note: `step_n` overwrites this each step when pulses are active.
+    pub fn set_pulse_amplitude(&self, pulse_idx: usize, amplitude_t: f32) {
+        if pulse_idx >= 4 { return; }
+        // pulse_amplitudes[i] at offset 400 + 4*i
+        let offset = 400 + (pulse_idx * 4) as u64;
+        self.queue.write_buffer(&self.params_buf, offset, bytemuck::bytes_of(&amplitude_t));
     }
 
     /// Update exchange bias for layer 0 at runtime.

@@ -1,6 +1,7 @@
 use magnonic_clock_sim::config::{Layer, SimConfig};
 use magnonic_clock_sim::gpu::GpuSolver;
 use magnonic_clock_sim::material::BulkMaterial;
+use magnonic_clock_sim::photonic::parse_pulse_spec;
 use magnonic_clock_sim::substrate::Substrate;
 
 /// Parse a `--stack` spec like "fgt-bulk:0.7,yig:2.0,fgt-bulk:0.7" into Layers.
@@ -136,6 +137,16 @@ fn main() {
                 config.probe_layer = Some(args[i + 1].parse().unwrap());
                 i += 2;
             }
+            "--pulse" => {
+                match parse_pulse_spec(&args[i + 1]) {
+                    Ok(pulse) => { config.photonic.pulses.push(pulse); }
+                    Err(e) => {
+                        eprintln!("--pulse parse error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                i += 2;
+            }
             "--list-materials" => {
                 println!("Available bulk materials:");
                 for m in BulkMaterial::list_all() {
@@ -222,6 +233,17 @@ fn main() {
                 eprintln!("  --jx F / --jy F / --jz F   Charge current [A/m²] (SOT drive of layer 0)");
                 eprintln!("  --dt F              Timestep [s] (default 1e-14)");
                 eprintln!("  --init MODE         uniform | random | stripe | skyrmion | alternating");
+                eprintln!();
+                eprintln!("Photonic drive (Phase P1-P2 — IFE laser pulses):");
+                eprintln!("  --pulse \"t=T,fwhm=W,peak=B,dir=D[,x=X,y=Y,sigma=S]\"");
+                eprintln!("                      Laser pulse: t = center time (ps default, or fs/ns/s),");
+                eprintln!("                      fwhm = FWHM duration (fs default), peak = IFE field [T],");
+                eprintln!("                      dir = x/y/z/-x/-y/-z or 'a,b,c' 3-vec.");
+                eprintln!("                      Optional spatial (P2): x, y = spot center [nm default,");
+                eprintln!("                      accepts um/mm/m suffix], sigma = 1-σ beam radius.");
+                eprintln!("                      Omit spatial keys or set sigma=0 for uniform illumination.");
+                eprintln!("                      Max 4 pulses. Example (focused):");
+                eprintln!("                      \"t=1ps,fwhm=100fs,peak=0.5T,dir=z,x=40nm,y=40nm,sigma=25nm\"");
                 eprintln!();
                 eprintln!("Material overrides (apply to first layer post-lookup):");
                 eprintln!("  --alpha F           Bulk Gilbert damping");

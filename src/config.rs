@@ -20,6 +20,7 @@
 
 use crate::effective::EffectiveParams3D;
 use crate::material::BulkMaterial;
+use crate::photonic::PhotonicConfig;
 use crate::substrate::Substrate;
 
 /// A single layer in a magnetic stack.
@@ -132,6 +133,9 @@ pub struct SimConfig {
     /// Charge current density [A/m²] through the substrate (SOT drive of layer 0)
     pub j_current: [f64; 3],
 
+    /// Photonic excitation — list of laser pulses. Empty = no optical drive (baseline).
+    pub photonic: PhotonicConfig,
+
     pub readback_interval: usize,
     pub total_steps: usize,
     /// In-plane probe index (default: center of grid)
@@ -158,6 +162,7 @@ impl SimConfig {
             b_ext: [0.0, 0.0, 0.0],
             stab_coeff: 1.0e11,
             j_current: [0.0, 0.0, 0.0],
+            photonic: PhotonicConfig::default(),
             readback_interval: 100,
             total_steps: 10_000,
             probe_idx: None,
@@ -194,6 +199,7 @@ impl SimConfig {
         eff.print_decomposition(&self.stack, &self.substrate, &self.geometry);
         eprintln!("B_ext    : ({:.3}, {:.3}, {:.3}) T",
                   self.b_ext[0], self.b_ext[1], self.b_ext[2]);
+        self.photonic.print_summary();
         eprintln!("================================");
     }
 }

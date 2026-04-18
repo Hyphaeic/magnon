@@ -351,6 +351,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             b_ext: [0.0, 0.0, bz],
                             stab_coeff: 1.0e11,
                             j_current: [jx, 0.0, 0.0],
+                            photonic: Default::default(),
                             readback_interval: 100,
                             total_steps: 0,
                             probe_idx: None,
