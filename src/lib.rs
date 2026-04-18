@@ -2,6 +2,8 @@ pub mod config;
 pub mod effective;
 pub mod gpu;
 pub mod material;
+pub mod material_thermal;
 pub mod metrics;
 pub mod photonic;
 pub mod substrate;
+pub mod thermal;

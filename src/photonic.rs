@@ -31,6 +31,14 @@ pub struct LaserPulse {
     pub spot_center: [f64; 2],
     /// 1-σ beam radius [meters]. If 0.0 or non-finite, treated as uniform (P1 behaviour).
     pub spot_sigma: f64,
+
+    // ─── Phase P3 fields — thermal (M3TM) source term ───
+    /// Absorbed-laser peak fluence [J/m²] (value at the peak of the Gaussian
+    /// envelope, before reflectivity subtraction). Some(_) enables the M3TM
+    /// source term for this pulse; None means coherent-only (P1-P2 behaviour).
+    pub peak_fluence: Option<f64>,
+    /// Surface reflectivity, 0..1. Only consulted when `peak_fluence.is_some()`.
+    pub reflectivity: f32,
 }
 
 impl LaserPulse {
@@ -50,6 +58,8 @@ impl LaserPulse {
             direction: dir,
             spot_center: [0.0, 0.0],
             spot_sigma: 0.0,
+            peak_fluence: None,
+            reflectivity: 0.0,
         }
     }
 
@@ -68,6 +78,154 @@ impl LaserPulse {
 #[derive(Clone, Debug, Default)]
 pub struct PhotonicConfig {
     pub pulses: Vec<LaserPulse>,
+    /// P3+: microscopic three-temperature + LLB parameters. `None` = LLG + IFE
+    /// only (P1-P2 behaviour). `Some(_)` engages the M3TM source term; the
+    /// magnetic dynamics path is selected by `thermal.enable_llb`.
+    pub thermal: Option<ThermalConfig>,
+}
+
+/// Phase P3 — Microscopic three-temperature + LLB configuration.
+///
+/// Owns per-layer thermal-bath parameters plus the timestep / integrator
+/// policy. When `enable_llb == false`, M3TM is advanced for observability
+/// only; magnetic dynamics still run the projected-Heun LLG path and the
+/// cell |m| stays 1. `enable_llb == true` engages the longitudinal-relaxation
+/// torque in the LLB integrator (P3b).
+#[derive(Clone, Debug)]
+pub struct ThermalConfig {
+    /// Ambient / starting temperature for all three baths [K].
+    pub t_ambient: f32,
+    /// Per-layer M3TM + LLB parameters (one entry per layer in the stack).
+    pub per_layer: Vec<LayerThermalParams>,
+    /// Timestep cap while inside a pulse's thermal window [s].
+    /// Typical 1e-15 s (1 fs). Enforced by host-side sub-looping.
+    pub thermal_dt_cap: f64,
+    /// (before, after) window around each pulse peak during which
+    /// `thermal_dt_cap` is enforced [s]. Default (0.5 ps, 10 ps).
+    pub thermal_window: (f64, f64),
+    /// Engage LLB longitudinal-relaxation path (P3b). Default false (P3a).
+    pub enable_llb: bool,
+}
+
+impl Default for ThermalConfig {
+    fn default() -> Self {
+        Self {
+            t_ambient: 300.0,
+            per_layer: Vec::new(),
+            thermal_dt_cap: 1.0e-15,
+            thermal_window: (0.5e-12, 10.0e-12),
+            enable_llb: false,
+        }
+    }
+}
+
+/// Per-layer thermal-bath + LLB-table parameters.
+///
+/// M3TM: Koopmans 2010 (Nat. Mater. 9, 259). R is precomputed on the host
+/// from the microscopic parameters here via `r_koopmans_prefactor()`.
+///
+/// LLB tables: `m_e_table[i]` and `chi_par_table[i]` sample equilibrium
+/// reduced magnetization and longitudinal susceptibility on a uniform grid
+/// `T_i = i · (1.5·t_c) / (llb_table_n − 1)` for `i = 0 .. llb_table_n − 1`.
+/// Built offline from a Brillouin / MFA model (see `material_thermal.rs`).
+#[derive(Clone, Debug)]
+pub struct LayerThermalParams {
+    // ─── M3TM microscopic parameters ────────────────────────────────
+    /// Electron heat-capacity coefficient: C_e(T) = γ_e · T [J/(m³·K²)].
+    pub gamma_e: f64,
+    /// Phonon heat capacity [J/(m³·K)] (Debye / Dulong-Petit near ambient).
+    pub c_p: f64,
+    /// Electron-phonon coupling [W/(m³·K)].
+    pub g_ep: f64,
+    /// Koopmans Elliott-Yafet scaling (dimensionless). ≈0.185 for Ni.
+    pub a_sf: f64,
+    /// Atomic moment in units of μ_B (dimensionless). ≈0.6 for Ni.
+    pub mu_atom_bohr: f64,
+    /// Atomic volume [m³] = 1 / (atomic number density).
+    pub v_atom: f64,
+    /// Debye temperature [K]. E_D = k_B · θ_D.
+    pub theta_d: f64,
+
+    // ─── LLB parameters ─────────────────────────────────────────────
+    /// Curie temperature [K]. Same as bulk Tc in most presets.
+    pub t_c: f64,
+    /// Low-temperature Gilbert damping α₀ (matches LLG α when thermal off).
+    pub alpha_0: f64,
+    /// Number of rows in `m_e_table` / `chi_par_table`.
+    pub llb_table_n: usize,
+    /// m_e(T_i) on uniform grid T_i ∈ [0, 1.5·t_c].
+    pub m_e_table: Vec<f32>,
+    /// χ_∥(T_i) on uniform grid T_i ∈ [0, 1.5·t_c] [dimensionless; μ_B / (k_B·T_c)-normalized].
+    pub chi_par_table: Vec<f32>,
+    /// Short human-readable provenance string.
+    pub notes: &'static str,
+}
+
+impl LayerThermalParams {
+    /// Boltzmann constant [J/K].
+    pub const K_B: f64 = 1.380_649e-23;
+
+    /// Koopmans R prefactor [1/s]:
+    ///     R = 8 · a_sf · g_ep · k_B · T_c² · V_at / (μ_at_μB · (k_B·θ_D)²)
+    /// with μ_at in units of μ_B (dimensionless). This is `R` in eq. (4) of
+    /// Koopmans 2010; R · m · (T_p/T_c) · (1 − m·coth(m·T_c/T_e)) gives dm/dt.
+    pub fn r_koopmans_prefactor(&self) -> f64 {
+        if self.mu_atom_bohr.abs() < 1e-20 || self.theta_d.abs() < 1e-20 {
+            return 0.0;
+        }
+        let e_d = Self::K_B * self.theta_d;
+        8.0 * self.a_sf * self.g_ep * Self::K_B * self.t_c.powi(2) * self.v_atom
+            / (self.mu_atom_bohr * e_d.powi(2))
+    }
+
+    /// Lookup m_e(T) from the table (linear interp, clamped at endpoints).
+    /// Grid: `T_i = i · (1.5·t_c) / (n − 1)`.
+    pub fn sample_m_e(&self, t: f64) -> f64 {
+        self.sample_table(&self.m_e_table, t)
+    }
+
+    pub fn sample_chi_par(&self, t: f64) -> f64 {
+        self.sample_table(&self.chi_par_table, t)
+    }
+
+    fn sample_table(&self, table: &[f32], t: f64) -> f64 {
+        let n = table.len();
+        if n == 0 {
+            return 0.0;
+        }
+        let t_max = 1.5 * self.t_c;
+        if t <= 0.0 {
+            return table[0] as f64;
+        }
+        if t >= t_max {
+            return table[n - 1] as f64;
+        }
+        let u = t / t_max * (n - 1) as f64;
+        let i0 = u.floor() as usize;
+        let i1 = (i0 + 1).min(n - 1);
+        let frac = u - i0 as f64;
+        (table[i0] as f64) * (1.0 - frac) + (table[i1] as f64) * frac
+    }
+}
+
+impl ThermalConfig {
+    pub fn print_summary(&self) {
+        eprintln!(
+            "Thermal  : T_ambient = {:.1} K, dt_cap = {:.2} fs, window = ({:.2}, {:.2}) ps, enable_llb = {}",
+            self.t_ambient,
+            self.thermal_dt_cap * 1e15,
+            self.thermal_window.0 * 1e12,
+            self.thermal_window.1 * 1e12,
+            self.enable_llb,
+        );
+        for (i, p) in self.per_layer.iter().enumerate() {
+            let r = p.r_koopmans_prefactor();
+            eprintln!(
+                "  layer[{i}] a_sf={:.3} g_ep={:.2e} Tc={:.0}K θ_D={:.0}K μ_at={:.2}μ_B α_0={:.4} R={:.3e}/s — {}",
+                p.a_sf, p.g_ep, p.t_c, p.theta_d, p.mu_atom_bohr, p.alpha_0, r, p.notes,
+            );
+        }
+    }
 }
 
 impl PhotonicConfig {
@@ -107,22 +265,30 @@ impl PhotonicConfig {
     }
 
     pub fn print_summary(&self) {
-        if self.pulses.is_empty() { return; }
-        eprintln!("Photonic drive: {} laser pulse(s)", self.pulses.len());
-        for (i, p) in self.pulses.iter().enumerate() {
-            let spatial = if p.spot_sigma > 0.0 {
-                format!(", spot = ({:.1}, {:.1}) nm, σ = {:.1} nm",
-                        p.spot_center[0] * 1e9, p.spot_center[1] * 1e9, p.spot_sigma * 1e9)
-            } else {
-                " [spatially uniform]".to_string()
-            };
-            eprintln!(
-                "  [{i}] t_center = {:.2} ps, FWHM = {:.1} fs, peak = {:.3} T, dir = ({:.2}, {:.2}, {:.2}){spatial}",
-                p.t_center * 1e12,
-                p.duration_fwhm * 1e15,
-                p.peak_field,
-                p.direction[0], p.direction[1], p.direction[2],
-            );
+        if !self.pulses.is_empty() {
+            eprintln!("Photonic drive: {} laser pulse(s)", self.pulses.len());
+            for (i, p) in self.pulses.iter().enumerate() {
+                let spatial = if p.spot_sigma > 0.0 {
+                    format!(", spot = ({:.1}, {:.1}) nm, σ = {:.1} nm",
+                            p.spot_center[0] * 1e9, p.spot_center[1] * 1e9, p.spot_sigma * 1e9)
+                } else {
+                    " [spatially uniform]".to_string()
+                };
+                let fluence = match p.peak_fluence {
+                    Some(f) => format!(", F = {:.3} mJ/cm² R = {:.2}", f * 0.1, p.reflectivity),
+                    None => String::new(),
+                };
+                eprintln!(
+                    "  [{i}] t_center = {:.2} ps, FWHM = {:.1} fs, peak = {:.3} T, dir = ({:.2}, {:.2}, {:.2}){spatial}{fluence}",
+                    p.t_center * 1e12,
+                    p.duration_fwhm * 1e15,
+                    p.peak_field,
+                    p.direction[0], p.direction[1], p.direction[2],
+                );
+            }
+        }
+        if let Some(t) = &self.thermal {
+            t.print_summary();
         }
     }
 }
@@ -150,6 +316,9 @@ pub fn parse_pulse_spec(spec: &str) -> Result<LaserPulse, String> {
     let mut spot_x: f64 = 0.0;
     let mut spot_y: f64 = 0.0;
     let mut spot_sigma: f64 = 0.0;
+    // P3 thermal keys (optional)
+    let mut fluence_j_m2: Option<f64> = None;
+    let mut reflectivity: f32 = 0.0;
 
     // Split on ',' but respect arbitrary 'dir=a,b,c' by a small trick:
     // parse keys one at a time, detecting if we're inside a 'dir=' value.
@@ -192,6 +361,13 @@ pub fn parse_pulse_spec(spec: &str) -> Result<LaserPulse, String> {
             "sigma" | "spot" | "spot_sigma" | "waist" => {
                 spot_sigma = parse_length_nm_default(&value)?;
             }
+            "fluence" | "F" => {
+                // Default unit: mJ/cm². Accept J/m² explicitly via suffix "J/m2" or "Jm2".
+                fluence_j_m2 = Some(parse_fluence_mj_cm2_default(&value)?);
+            }
+            "R" | "reflectivity" => {
+                reflectivity = value.parse().map_err(|e| format!("reflectivity: {e}"))?;
+            }
             other => return Err(format!("Unknown pulse key: '{other}'")),
         }
     }
@@ -204,7 +380,24 @@ pub fn parse_pulse_spec(spec: &str) -> Result<LaserPulse, String> {
     let mut pulse = LaserPulse::new(t_center, fwhm, peak, dir);
     pulse.spot_center = [spot_x, spot_y];
     pulse.spot_sigma = spot_sigma;
+    pulse.peak_fluence = fluence_j_m2;
+    pulse.reflectivity = reflectivity;
     Ok(pulse)
+}
+
+/// Parse a fluence value. Default unit: mJ/cm². Accepts "Jm2"/"J/m2" for SI.
+/// Returns fluence in J/m².
+fn parse_fluence_mj_cm2_default(s: &str) -> Result<f64, String> {
+    let s = s.trim();
+    if let Some(r) = s.strip_suffix("J/m2").or_else(|| s.strip_suffix("Jm2")) {
+        let v: f64 = r.trim().parse().map_err(|e| format!("fluence '{s}': {e}"))?;
+        Ok(v)
+    } else {
+        let r = s.strip_suffix("mJ/cm2").unwrap_or(s);
+        let v: f64 = r.trim().parse().map_err(|e| format!("fluence '{s}': {e}"))?;
+        // 1 mJ/cm² = 10 J/m²
+        Ok(v * 10.0)
+    }
 }
 
 /// Parse a length with nm/um/mm/m suffix. Default unit: nm.
@@ -308,6 +501,7 @@ mod tests {
     fn field_at_time_scales_with_direction() {
         let cfg = PhotonicConfig {
             pulses: vec![LaserPulse::new(0.0, 100e-15, 2.0, [0.0, 0.0, 1.0])],
+            ..Default::default()
         };
         let b = cfg.field_at_time(0.0);
         assert!((b[0]).abs() < 1e-6);

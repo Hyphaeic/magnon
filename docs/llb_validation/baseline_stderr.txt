@@ -1,0 +1,37 @@
+=== Magnonic Clock Simulator ===
+Stack: 1 layer(s)
+  [0] fgt-bulk @ 0.70 nm, u_axis=(0.00,0.00,1.00)
+Substrate (bottom interface): vacuum
+Geometry : 256×256×1, cell 2.50 nm
+Domain   : 640.0 × 640.0 nm
+Timestep : 0.01 ps
+Effective params per layer (vacuum substrate at bottom):
+  Layer 0 [fgt-bulk] t=0.70nm:
+    Ms    = 3.760e5 A/m
+    A_ex  = 9.500e-12 J/m
+    K_u   = 1.460e6 J/m³ (bulk 1.460e6)
+    α     = 0.00100
+B_ext    : (0.000, 0.000, 0.000) T
+================================
+GPU adapter: NVIDIA GeForce RTX 4060
+[100/2000] 9446 steps/s | avg_mz=0.9988 | |m| in [1.000000, 1.000000]
+[200/2000] 10185 steps/s | avg_mz=0.9988 | |m| in [1.000000, 1.000000]
+[300/2000] 10473 steps/s | avg_mz=0.9988 | |m| in [1.000000, 1.000000]
+[400/2000] 10531 steps/s | avg_mz=0.9988 | |m| in [1.000000, 1.000000]
+[500/2000] 10611 steps/s | avg_mz=0.9988 | |m| in [1.000000, 1.000000]
+[600/2000] 10599 steps/s | avg_mz=0.9988 | |m| in [1.000000, 1.000000]
+[700/2000] 10632 steps/s | avg_mz=0.9988 | |m| in [1.000000, 1.000000]
+[800/2000] 10640 steps/s | avg_mz=0.9989 | |m| in [1.000000, 1.000000]
+[900/2000] 10657 steps/s | avg_mz=0.9989 | |m| in [1.000000, 1.000000]
+[1000/2000] 10652 steps/s | avg_mz=0.9989 | |m| in [1.000000, 1.000000]
+[1100/2000] 10633 steps/s | avg_mz=0.9989 | |m| in [1.000000, 1.000000]
+[1200/2000] 10626 steps/s | avg_mz=0.9989 | |m| in [1.000000, 1.000000]
+[1300/2000] 10580 steps/s | avg_mz=0.9989 | |m| in [1.000000, 1.000000]
+[1400/2000] 10595 steps/s | avg_mz=0.9989 | |m| in [1.000000, 1.000000]
+[1500/2000] 10588 steps/s | avg_mz=0.9990 | |m| in [1.000000, 1.000000]
+[1600/2000] 10604 steps/s | avg_mz=0.9990 | |m| in [1.000000, 1.000000]
+[1700/2000] 10610 steps/s | avg_mz=0.9990 | |m| in [1.000000, 1.000000]
+[1800/2000] 10601 steps/s | avg_mz=0.9990 | |m| in [1.000000, 1.000000]
+[1900/2000] 10609 steps/s | avg_mz=0.9990 | |m| in [1.000000, 1.000000]
+[2000/2000] 10604 steps/s | avg_mz=0.9990 | |m| in [1.000000, 1.000000]
+Done: 2000 steps in 0.19s (10603 steps/s)

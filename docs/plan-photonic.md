@@ -757,3 +757,26 @@ When resuming:
 - Execute Phase P3a on approval; validation is the single-cell M3TM ODE match against the GPU kernel.
 
 Ready to execute Phase P3a on your go-ahead. Estimated session length for P3a: 2-3 days focused work plus validation.
+
+---
+
+### Implementation notes for P3a
+
+**Status:** Complete, 2026-04-18. Commit tagged at boundary; awaiting approval to start P3b.
+
+**What landed:**
+- `src/photonic.rs` — `LaserPulse` gained `peak_fluence: Option<f64>` and `reflectivity: f32`; new `ThermalConfig` and `LayerThermalParams` structs plus `r_koopmans_prefactor()` helper; pulse parser accepts `fluence=` (mJ/cm² default) and `R=` keys.
+- `src/material_thermal.rs` — Brillouin / MFA spin-1/2 table generator plus presets: `ni_m3tm` (Koopmans 2010 verified), `py_m3tm`, `fgt_ni_surrogate` (flagged uncalibrated), `yig_inert` (a_sf ≈ 0), `cofeb_m3tm`.
+- `src/thermal.rs` — host-side reference Heun integrator for single-cell M3TM, used as the oracle for the GPU kernel.
+- `src/gpu.rs` — `GpuParams` extended to 640 B with 6 × vec4 thermal scalars appended at the end (see ADR-003 D1); three new per-cell storage buffers (`temp_e`, `temp_p`, `m_reduced`); two read-only LLB tables (`m_e`, `χ_∥`) sized `MAX_LAYERS × 256`; BGL extended from 6 to 11 bindings; `max_storage_buffers_per_shader_stage` raised to 16; `Observables` gained `max_t_e`, `max_t_p`, `min_m_reduced`.
+- `src/shaders/llg.wgsl` — `Params` extended with the same six thermal vec4s appended at the end; five new bindings (6-10); helpers `coth_safe`, `koopmans_dmdt`, `m3tm_derivs`, `laser_power_density_at`; new entry `advance_m3tm`. M3TM dispatched as a 5th compute pipeline when `photonic.thermal.is_some()`; LLG kernels untouched.
+- `src/main.rs` — new CLI flags `--enable-thermal`, `--enable-llb`, `--t-ambient`, `--thermal-dt-cap`, `--thermal-params-for`. CSV header / fmt gains thermal columns.
+
+**Acceptance evidence:**
+- `examples/test_m3tm_gpu_vs_host.rs` — 3 ps single-cell Ni / 1 mJ/cm² / 100 fs Gaussian run: GPU `advance_m3tm` matches host Heun to **8.8×10⁻⁷ relative on T_e and 1.25×10⁻⁶ absolute on |m|** (both three orders of magnitude below the 1e-3 gate).
+- LLG regression: thermal-off `fgt_default` run against `pre-thermal-baseline` shows the `min_norm` / `max_norm` columns matching byte-for-byte across 202 readback rows at 10 k steps/s.
+- Unit tests: 7 new tests across `material_thermal` + `thermal` (m_e bounds, χ_∥ non-negativity, R prefactor sign / magnitude, equilibrium stability, ultrafast-demag smoke test).
+
+**Deviations from §3.5:** ADR-003 documents four — append-at-end `GpuParams` layout (vs. shift-to-592), single-shader file (vs. split `llg.wgsl`/`m3tm.wgsl`), `pulse_directions[p].w` as the M3TM source-density channel, raised storage-buffer limit.
+
+**Deferred to P3b/P3c:** µMAG SP4 regression harness (requires deterministic initial state infrastructure), host-side adaptive dt sub-looping (host-side dt-cap not yet enforced — `thermal_dt_cap` stored but advisory in P3a), back-coupling from M3TM to LLG torque (explicitly out of P3a scope per the plan).

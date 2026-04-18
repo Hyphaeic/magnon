@@ -1,7 +1,8 @@
 use magnonic_clock_sim::config::{Layer, SimConfig};
 use magnonic_clock_sim::gpu::GpuSolver;
 use magnonic_clock_sim::material::BulkMaterial;
-use magnonic_clock_sim::photonic::parse_pulse_spec;
+use magnonic_clock_sim::material_thermal;
+use magnonic_clock_sim::photonic::{parse_pulse_spec, ThermalConfig};
 use magnonic_clock_sim::substrate::Substrate;
 
 /// Parse a `--stack` spec like "fgt-bulk:0.7,yig:2.0,fgt-bulk:0.7" into Layers.
@@ -145,6 +146,44 @@ fn main() {
                         std::process::exit(1);
                     }
                 }
+                i += 2;
+            }
+            "--enable-thermal" => {
+                // Start with a minimal default ThermalConfig; per-layer
+                // presets must be supplied via --thermal-params-for.
+                if config.photonic.thermal.is_none() {
+                    config.photonic.thermal = Some(ThermalConfig::default());
+                }
+                i += 1;
+            }
+            "--enable-llb" => {
+                let t = config.photonic.thermal.get_or_insert_with(ThermalConfig::default);
+                t.enable_llb = true;
+                i += 1;
+            }
+            "--t-ambient" => {
+                let t = config.photonic.thermal.get_or_insert_with(ThermalConfig::default);
+                t.t_ambient = args[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--thermal-dt-cap" => {
+                let t = config.photonic.thermal.get_or_insert_with(ThermalConfig::default);
+                t.thermal_dt_cap = args[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--thermal-params-for" => {
+                // Apply preset to every layer in the stack.
+                let key = args[i + 1].to_string();
+                let preset = match material_thermal::for_key(&key) {
+                    Some(p) => p,
+                    None => {
+                        eprintln!("Unknown --thermal-params-for key: {key}");
+                        std::process::exit(1);
+                    }
+                };
+                let t = config.photonic.thermal.get_or_insert_with(ThermalConfig::default);
+                let n_layers = config.stack.layers.len();
+                t.per_layer = vec![preset; n_layers];
                 i += 2;
             }
             "--list-materials" => {
@@ -301,7 +340,7 @@ fn main() {
         }
     }
 
-    println!("step,time_ps,avg_mx,avg_my,avg_mz,min_norm,max_norm,probe_mz");
+    println!("step,time_ps,avg_mx,avg_my,avg_mz,min_norm,max_norm,probe_mz,max_t_e,max_t_p,min_m_reduced");
 
     let obs = solver.observables();
     println!("{obs}");

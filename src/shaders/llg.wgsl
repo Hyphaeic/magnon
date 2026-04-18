@@ -62,6 +62,15 @@ struct Params {
     pulse_amplitudes: vec4<f32>,                      // [T], packed 4 pulses
     pulse_spot_centers: array<vec4<f32>, 4>,           // (x, y, σ_r, _pad) meters
     pulse_directions: array<vec4<f32>, 4>,             // unit vec3 + pad
+
+    // Phase P3 — per-layer thermal (M3TM + LLB) scalars. Appended at the
+    // end so the P1-P2 pulse offsets do not shift. See ADR-003.
+    layer_thermal_gamma_e: vec4<f32>,   // J/(m³·K²)
+    layer_thermal_c_p: vec4<f32>,       // J/(m³·K)
+    layer_thermal_g_ep: vec4<f32>,      // W/(m³·K)
+    layer_thermal_a_sf_r: vec4<f32>,    // precomputed R Koopmans prefactor [1/s]
+    layer_thermal_t_c: vec4<f32>,       // K
+    layer_thermal_alpha_0: vec4<f32>,   // dimensionless
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -70,6 +79,16 @@ struct Params {
 @group(0) @binding(3) var<storage, read_write> h_eff: array<f32>;
 @group(0) @binding(4) var<storage, read_write> torque_0: array<f32>;
 @group(0) @binding(5) var<storage, read_write> torque_1: array<f32>;
+
+// Phase P3 — thermal storage buffers. Always allocated so the bind-group
+// layout is stable across runs; only written by `advance_m3tm`.
+@group(0) @binding(6) var<storage, read_write> temp_e: array<f32>;
+@group(0) @binding(7) var<storage, read_write> temp_p: array<f32>;
+@group(0) @binding(8) var<storage, read_write> m_reduced: array<f32>;
+@group(0) @binding(9) var<storage, read> m_e_table: array<f32>;
+@group(0) @binding(10) var<storage, read> chi_par_table: array<f32>;
+
+const LLB_TABLE_N: u32 = 256u;
 
 // ─── Index helpers ─────────────────────────────────────────────
 
@@ -335,4 +354,134 @@ fn heun_correct(@builtin(global_invocation_id) gid: vec3<u32>) {
     mag[b] = m_new.x;
     mag[b + 1u] = m_new.y;
     mag[b + 2u] = m_new.z;
+}
+
+// ─── Phase P3 — M3TM kernel ────────────────────────────────────
+//
+// Per-cell Heun-step of the Koopmans 2010 three-temperature model:
+//     C_e(T_e) dT_e/dt = −g_ep·(T_e − T_p) + P_laser(r, t)
+//     C_p       dT_p/dt =  g_ep·(T_e − T_p)
+//              dm/dt  = R · m · (T_p/T_c) · (1 − m · coth(m·T_c/T_e))
+//
+// with C_e = γ_e · T_e. Laser absorbed power density:
+//     P_laser(r, t) = (1 − R) · F / (Δt_eff · thickness) · envelope(r, t)
+// where envelope is the SAME spatial × amplitude Gaussian used by
+// `laser_field_at`. Because the pulse amplitude uniform is re-written per
+// host step with the temporal envelope at the step midpoint, this kernel
+// receives `pulse_amplitudes[p]` as the instantaneous peak B field — to
+// recover intensity we need the companion fluence term.
+//
+// We pass absorbed-peak power density in via a dedicated channel: the
+// fourth component of each `pulse_directions[p]` (previously zero padding).
+// Host sets it to `(1 − R)·F / (√(2π)·σ_t · t_layer)` when fluence is
+// specified; zero otherwise. See `GpuParams::compute_pulse_power_density`.
+
+fn coth_safe(x: f32) -> f32 {
+    let ax = abs(x);
+    if ax > 20.0 {
+        return sign(x);
+    }
+    return 1.0 / tanh(x);
+}
+
+/// Absorbed volumetric power density at cell idx at the current step midpoint
+/// [W/m³]. Returns 0 if no pulse carries fluence (peak_fluence = None on host).
+fn laser_power_density_at(idx: u32) -> f32 {
+    let in_plane_idx = idx % in_plane_count();
+    let ix = in_plane_idx / params.ny;
+    let iy = in_plane_idx % params.ny;
+    let x = (f32(ix) + 0.5) * params.cell_size_m;
+    let y = (f32(iy) + 0.5) * params.cell_size_m;
+
+    // Temporal envelope amplitude (linear in pulse_amplitudes[p] / peak_B).
+    // To recover the dimensionless envelope we divide the current amp by
+    // the nominal peak_field uniform — but we don't store that separately.
+    // Instead, host writes envelope directly into `pulse_directions[p].w`
+    // each step: w = (1 − R)·P_peak·envelope_at(t_mid), i.e. instantaneous
+    // peak absorbed volumetric power density [W/m³] BEFORE the spatial
+    // Gaussian.
+    var total: f32 = 0.0;
+    for (var p: u32 = 0u; p < params.pulse_count; p = p + 1u) {
+        let center = params.pulse_spot_centers[p];
+        let sigma = center.z;
+        let p_inst = params.pulse_directions[p].w;
+        if p_inst == 0.0 { continue; }
+
+        var weight: f32 = 1.0;
+        if sigma > 0.0 {
+            let dx = x - center.x;
+            let dy = y - center.y;
+            let r2 = dx * dx + dy * dy;
+            weight = exp(-r2 / (2.0 * sigma * sigma));
+        }
+        total = total + p_inst * weight;
+    }
+    return total;
+}
+
+/// Koopmans dm/dt term. Evaluates the ferromagnet-saturation-aware form:
+///   R · m · (T_p / T_c) · (1 − m · coth(m · T_c / T_e))
+/// with a small-argument expansion near m·Tc/Te ≈ 0 to avoid the 1/x pole
+/// in coth.
+fn koopmans_dmdt(m: f32, t_e: f32, t_p: f32, r_pref: f32, t_c: f32) -> f32 {
+    if t_c < 1.0 || t_e < 1.0 || r_pref == 0.0 {
+        return 0.0;
+    }
+    let x = m * t_c / t_e;
+    var m_coth: f32;
+    if abs(x) < 1e-3 {
+        // m · coth(m·Tc/Te) ≈ Te/Tc + m²·Tc/(3·Te)
+        m_coth = t_e / t_c + m * m * t_c / (3.0 * t_e);
+    } else {
+        m_coth = m * coth_safe(x);
+    }
+    return r_pref * m * (t_p / t_c) * (1.0 - m_coth);
+}
+
+struct M3tmState { t_e: f32, t_p: f32, m: f32 }
+
+fn m3tm_derivs(s: M3tmState, p_laser: f32, iz: u32) -> vec3<f32> {
+    let gamma_e = params.layer_thermal_gamma_e[iz];
+    let c_p = params.layer_thermal_c_p[iz];
+    let g_ep = params.layer_thermal_g_ep[iz];
+    let r_pref = params.layer_thermal_a_sf_r[iz];
+    let t_c = params.layer_thermal_t_c[iz];
+
+    let c_e = max(gamma_e * s.t_e, 1.0);
+    let dt_e = (p_laser - g_ep * (s.t_e - s.t_p)) / c_e;
+    let dt_p = g_ep * (s.t_e - s.t_p) / max(c_p, 1.0);
+    let dm = koopmans_dmdt(s.m, s.t_e, s.t_p, r_pref, t_c);
+    return vec3<f32>(dt_e, dt_p, dm);
+}
+
+@compute @workgroup_size(64)
+fn advance_m3tm(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if idx >= params.cell_count { return; }
+    let iz = layer_of(idx);
+    let dt = params.dt;
+
+    var s: M3tmState;
+    s.t_e = temp_e[idx];
+    s.t_p = temp_p[idx];
+    s.m   = m_reduced[idx];
+
+    let p_laser = laser_power_density_at(idx);
+
+    // Heun predictor
+    let d1 = m3tm_derivs(s, p_laser, iz);
+    var s_pred: M3tmState;
+    s_pred.t_e = max(s.t_e + dt * d1.x, 1.0);
+    s_pred.t_p = max(s.t_p + dt * d1.y, 1.0);
+    s_pred.m   = clamp(s.m + dt * d1.z, -1.0, 1.0);
+
+    // Heun corrector
+    let d2 = m3tm_derivs(s_pred, p_laser, iz);
+    let new_te = max(s.t_e + 0.5 * dt * (d1.x + d2.x), 1.0);
+    let new_tp = max(s.t_p + 0.5 * dt * (d1.y + d2.y), 1.0);
+    let new_m  = clamp(s.m + 0.5 * dt * (d1.z + d2.z), -1.0, 1.0);
+
+    temp_e[idx] = new_te;
+    temp_p[idx] = new_tp;
+    m_reduced[idx] = new_m;
 }
