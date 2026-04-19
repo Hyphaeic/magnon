@@ -1,6 +1,8 @@
+use std::sync::Arc;
 use std::time::Instant;
 
 use minifb::{Key, KeyRepeat, Window, WindowOptions};
+use rustfft::{num_complex::Complex, Fft, FftPlanner};
 
 use magnonic_clock_sim::config::{Layer, SimConfig};
 use magnonic_clock_sim::gpu::GpuSolver;
@@ -46,10 +48,11 @@ enum HeatmapField {
     Mz,
     Mx,
     My,
-    MMag,      // |m|
-    TeK,       // electron temperature [K]
-    TpK,       // phonon temperature [K]
-    MReduced,  // M3TM's m_reduced (mirrors |mag| under LLB back-coupling)
+    MMag,       // |m|
+    TeK,        // electron temperature [K]
+    TpK,        // phonon temperature [K]
+    MReduced,   // M3TM's m_reduced (mirrors |mag| under LLB back-coupling)
+    KspacePower, // |FFT(mx + i·my)|² over the displayed layer, fftshifted (k=0 centre)
 }
 
 impl HeatmapField {
@@ -62,11 +65,13 @@ impl HeatmapField {
             Self::TeK => "Te",
             Self::TpK => "Tp",
             Self::MReduced => "m_red",
+            Self::KspacePower => "|M(k)|^2",
         }
     }
     fn units(self) -> &'static str {
         match self {
             Self::TeK | Self::TpK => "K",
+            Self::KspacePower => "dB",
             _ => "",
         }
     }
@@ -75,6 +80,121 @@ impl HeatmapField {
     }
     fn signed(self) -> bool {
         matches!(self, Self::Mz | Self::Mx | Self::My)
+    }
+    fn is_kspace(self) -> bool {
+        matches!(self, Self::KspacePower)
+    }
+}
+
+// ── 2D FFT helper ─────────────────────────────────────────────────
+//
+// Separable forward 2D FFT on an nx × ny grid. Caches two 1D plans
+// (length nx and length ny) across calls so the plan setup cost is paid
+// once; inner buffers are passed in to avoid per-frame allocation.
+
+struct KspaceEngine {
+    nx: usize,
+    ny: usize,
+    fft_x: Arc<dyn Fft<f32>>,
+    fft_y: Arc<dyn Fft<f32>>,
+    grid: Vec<Complex<f32>>,
+    col: Vec<Complex<f32>>,
+    /// |ψ(k)|² at each (kx, ky) bin, fftshifted so (nx/2, ny/2) is k=0.
+    power_shifted: Vec<f32>,
+    /// Cached (min, max) of log-scale display values (dB).
+    last_db_range: (f32, f32),
+}
+
+impl KspaceEngine {
+    fn new(nx: usize, ny: usize) -> Self {
+        let mut planner = FftPlanner::<f32>::new();
+        let fft_x = planner.plan_fft_forward(nx);
+        let fft_y = planner.plan_fft_forward(ny);
+        Self {
+            nx,
+            ny,
+            fft_x,
+            fft_y,
+            grid: vec![Complex { re: 0.0, im: 0.0 }; nx * ny],
+            col: vec![Complex { re: 0.0, im: 0.0 }; ny],
+            power_shifted: vec![0.0; nx * ny],
+            last_db_range: (-60.0, 0.0),
+        }
+    }
+
+    /// Recompute |FFT(mx + i·my)|² for one layer. `mag` is the full
+    /// magnetization buffer (nx·ny·nz cells × 4 floats). After this returns,
+    /// `power_shifted[iy*nx + ix]` gives the fftshifted magnitude-squared
+    /// at bin (ix, iy), with k=0 at screen centre (ix=nx/2, iy=ny/2).
+    ///
+    /// Log-scale (dB relative to peak) is computed here too; `last_db_range`
+    /// holds (floor, 0 dB).
+    fn compute(&mut self, mag: &[f32], layer: usize) {
+        let nx = self.nx;
+        let ny = self.ny;
+        let offset = layer * nx * ny;
+        // Populate ψ(x, y) = mx + i·my. Row-major (iy outer, ix inner) so
+        // that one "row" in `grid` is ix ∈ [0, nx).
+        for iy in 0..ny {
+            for ix in 0..nx {
+                let cell = offset + ix * ny + iy;
+                let mx = mag[cell * 4];
+                let my = mag[cell * 4 + 1];
+                self.grid[iy * nx + ix] = Complex { re: mx, im: my };
+            }
+        }
+        // Row FFTs (length nx).
+        for iy in 0..ny {
+            let row_start = iy * nx;
+            self.fft_x.process(&mut self.grid[row_start..row_start + nx]);
+        }
+        // Column FFTs (length ny) via transpose-and-back.
+        for ix in 0..nx {
+            for iy in 0..ny {
+                self.col[iy] = self.grid[iy * nx + ix];
+            }
+            self.fft_y.process(&mut self.col);
+            for iy in 0..ny {
+                self.grid[iy * nx + ix] = self.col[iy];
+            }
+        }
+        // fftshift + |ψ|² into power_shifted.
+        let hx = nx / 2;
+        let hy = ny / 2;
+        let mut peak = 0.0_f32;
+        for iy in 0..ny {
+            for ix in 0..nx {
+                let src_ix = (ix + hx) % nx;
+                let src_iy = (iy + hy) % ny;
+                let c = self.grid[src_iy * nx + src_ix];
+                let p = c.re * c.re + c.im * c.im;
+                self.power_shifted[iy * nx + ix] = p;
+                if p > peak {
+                    peak = p;
+                }
+            }
+        }
+        // Convert to dB relative to peak. Floor at -80 dB so the log never
+        // goes to -inf on pure-zero bins.
+        let log_peak = (peak.max(1e-30)).ln() * (10.0 / std::f32::consts::LN_10);
+        let mut mn = f32::INFINITY;
+        for p in self.power_shifted.iter_mut() {
+            let db = (p.max(1e-30)).ln() * (10.0 / std::f32::consts::LN_10) - log_peak;
+            let db = db.max(-80.0);
+            *p = db;
+            if db < mn {
+                mn = db;
+            }
+        }
+        // Display range: [-60 dB, 0 dB] default, but stretch to actual floor
+        // if the scene has less dynamic range (uniform state → shallow).
+        let display_floor = mn.max(-60.0);
+        self.last_db_range = (display_floor, 0.0);
+    }
+
+    /// Read fftshifted display value at (ix, iy) in screen coordinates.
+    fn sample(&self, ix: usize, iy: usize) -> f32 {
+        self.power_shifted[iy * self.nx + ix]
     }
 }
 
@@ -244,17 +364,22 @@ fn main() {
         m_red_data = solver.readback_m_reduced();
     }
 
-    // Field cycling (D1)
+    // Field cycling (D1 + C)
     let all_fields: &[HeatmapField] = &[
         HeatmapField::Mz,
         HeatmapField::Mx,
         HeatmapField::My,
         HeatmapField::MMag,
+        HeatmapField::KspacePower,
         HeatmapField::TeK,
         HeatmapField::TpK,
         HeatmapField::MReduced,
     ];
     let mut field_idx = 0usize;
+
+    // Lazy k-space engine — allocated on first use. A common path
+    // (view ≠ KspacePower) pays zero allocation / FFT cost.
+    let mut kspace: Option<KspaceEngine> = None;
 
     print_controls();
 
@@ -349,6 +474,13 @@ fn main() {
                     break;
                 }
             }
+            // If we just switched to KspacePower while paused, force one
+            // FFT pass so the user sees a populated spectrum rather than a
+            // blank panel until Space is pressed.
+            if all_fields[field_idx] == HeatmapField::KspacePower && !running {
+                let eng = kspace.get_or_insert_with(|| KspaceEngine::new(nx, ny));
+                eng.compute(&mag_data, display_layer as usize);
+            }
             eprintln!("VIEW: {}", all_fields[field_idx].label());
         }
         for (key, layer) in [
@@ -385,6 +517,12 @@ fn main() {
                     temp_p_data = solver.readback_temp_p();
                 }
             }
+            // k-space view: 2D FFT of (mx + i·my) on the displayed layer.
+            // Compute per-frame when the view is active, skip otherwise.
+            if all_fields[field_idx] == HeatmapField::KspacePower {
+                let eng = kspace.get_or_insert_with(|| KspaceEngine::new(nx, ny));
+                eng.compute(&mag_data, display_layer as usize);
+            }
             let obs = solver.observables();
 
             push_trim(&mut mz_hist, obs.avg_mz, win_w);
@@ -415,11 +553,13 @@ fn main() {
         let field = all_fields[field_idx];
         let (field_min, field_max) = field_range(
             field, &mag_data, &temp_e_data, &temp_p_data, &m_red_data,
+            kspace.as_ref(),
             nx, ny, display_layer as usize, t_ambient,
         );
         draw_heatmap(
             &mut framebuf, win_w, win_h, field,
             &mag_data, &temp_e_data, &temp_p_data, &m_red_data,
+            kspace.as_ref(),
             nx, ny, display_layer as usize, field_min, field_max,
         );
         draw_status_panel(
@@ -463,14 +603,21 @@ fn field_sample(
         HeatmapField::TeK => te.get(cell).copied().unwrap_or(0.0),
         HeatmapField::TpK => tp.get(cell).copied().unwrap_or(0.0),
         HeatmapField::MReduced => mr.get(cell).copied().unwrap_or(0.0),
+        // Reached only if called by mistake — draw_heatmap short-circuits
+        // via `is_kspace()` before calling field_sample.
+        HeatmapField::KspacePower => 0.0,
     }
 }
 
 fn field_range(
     field: HeatmapField,
     mag: &[f32], te: &[f32], tp: &[f32], mr: &[f32],
+    kspace: Option<&KspaceEngine>,
     nx: usize, ny: usize, display_layer: usize, t_ambient: f32,
 ) -> (f32, f32) {
+    if field.is_kspace() {
+        return kspace.map(|k| k.last_db_range).unwrap_or((-60.0, 0.0));
+    }
     if field.signed() {
         // Symmetric auto-scale around 0 so the diverging colormap's centre
         // (white) stays aligned with m=0. Without this, a nearly-uniform +z
@@ -530,19 +677,27 @@ fn draw_heatmap(
     buf: &mut [u32], stride: usize, total_h: usize,
     field: HeatmapField,
     mag: &[f32], te: &[f32], tp: &[f32], mr: &[f32],
+    kspace: Option<&KspaceEngine>,
     nx: usize, ny: usize, display_layer: usize,
     field_min: f32, field_max: f32,
 ) {
     let layer_offset = display_layer * nx * ny;
     let signed = field.signed();
+    let is_kspace = field.is_kspace();
     for iy in 0..ny {
         for ix in 0..nx {
-            let cell = layer_offset + ix * ny + iy;
-            let v = field_sample(field, mag, te, tp, mr, cell);
+            let v = if is_kspace {
+                kspace.map(|k| k.sample(ix, iy)).unwrap_or(field_min)
+            } else {
+                let cell = layer_offset + ix * ny + iy;
+                field_sample(field, mag, te, tp, mr, cell)
+            };
             let color = if signed {
                 diverging_rgb(v, field_min, field_max)
             } else {
-                sequential_rgb(v, field_min, field_max, matches!(field, HeatmapField::TeK | HeatmapField::TpK))
+                // k-space uses a hot-style ramp too (high power = bright).
+                let hot = matches!(field, HeatmapField::TeK | HeatmapField::TpK | HeatmapField::KspacePower);
+                sequential_rgb(v, field_min, field_max, hot)
             };
             if iy < total_h && ix < stride {
                 buf[iy * stride + ix] = color;
