@@ -472,7 +472,25 @@ fn field_range(
     nx: usize, ny: usize, display_layer: usize, t_ambient: f32,
 ) -> (f32, f32) {
     if field.signed() {
-        return (-1.0, 1.0);
+        // Symmetric auto-scale around 0 so the diverging colormap's centre
+        // (white) stays aligned with m=0. Without this, a nearly-uniform +z
+        // state with 5° init cone (|Mx|, |My| ≈ 0.08) maps to the middle
+        // of [-1, +1] and all non-Mz views collapse to pale-grey noise
+        // indistinguishable from each other.
+        let layer_offset = display_layer * nx * ny;
+        let mut amax = 0.0_f32;
+        for iy in 0..ny {
+            for ix in 0..nx {
+                let cell = layer_offset + ix * ny + iy;
+                let v = field_sample(field, mag, te, tp, mr, cell).abs();
+                if v > amax { amax = v; }
+            }
+        }
+        // Floor to 0.05 so a pure-equilibrium state doesn't amplify numerical
+        // noise to full-saturation. Ceiling is 1.0 because unit magnetisation
+        // is the physical upper bound.
+        let amax = amax.max(0.05).min(1.0);
+        return (-amax, amax);
     }
     match field {
         HeatmapField::MMag | HeatmapField::MReduced => (0.0, 1.0),
@@ -522,7 +540,7 @@ fn draw_heatmap(
             let cell = layer_offset + ix * ny + iy;
             let v = field_sample(field, mag, te, tp, mr, cell);
             let color = if signed {
-                diverging_rgb(v)
+                diverging_rgb(v, field_min, field_max)
             } else {
                 sequential_rgb(v, field_min, field_max, matches!(field, HeatmapField::TeK | HeatmapField::TpK))
             };
@@ -742,9 +760,11 @@ fn draw_status_panel(
 
 // ── Colormaps ──────────────────────────────────────────────────────
 
-/// Diverging blue-white-red map for signed [-1, +1] data (Mz/Mx/My).
-fn diverging_rgb(v: f32) -> u32 {
-    let t = ((v + 1.0) * 0.5).clamp(0.0, 1.0);
+/// Diverging blue-white-red map for signed data. `vmin` and `vmax` must be
+/// supplied symmetric around 0 (e.g., ±amax); white corresponds to v = 0.
+fn diverging_rgb(v: f32, vmin: f32, vmax: f32) -> u32 {
+    let range = (vmax - vmin).max(1e-6);
+    let t = ((v - vmin) / range).clamp(0.0, 1.0);
     let (r, g, b) = if t < 0.5 {
         let s = t * 2.0;
         ((s * 255.0) as u32, (s * 255.0) as u32, 255u32)
