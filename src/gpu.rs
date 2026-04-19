@@ -948,6 +948,88 @@ impl GpuSolver {
         self.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&params));
     }
 
+    /// Current simulation time [s]. Matches `observables().time_ps / 1e12`.
+    pub fn t_sim(&self) -> f64 {
+        self.t_sim
+    }
+
+    /// Append a pulse to the photonic config. If already at MAX_PULSES (= 4)
+    /// the oldest pulse is evicted. Re-uploads params so the GPU sees the
+    /// new pulse on the next `step_n`. Used by the dashboard for runtime
+    /// pulse firing.
+    pub fn add_pulse(&mut self, pulse: crate::photonic::LaserPulse) {
+        if self.config.photonic.pulses.len() >= 4 {
+            self.config.photonic.pulses.remove(0);
+        }
+        self.config.photonic.pulses.push(pulse);
+        self.upload_params();
+    }
+
+    /// Clear all queued pulses (including the current one, even mid-envelope).
+    pub fn clear_pulses(&mut self) {
+        self.config.photonic.pulses.clear();
+        self.upload_params();
+    }
+
+    /// Toggle thermal dynamics on/off at runtime. When enabling, the per-
+    /// cell temperature and m_reduced buffers are reset to the config's
+    /// `t_ambient` / m_e(t_ambient) values; pre-existing buffer contents
+    /// are discarded. When disabling, those buffers are left alone (the
+    /// LLG path ignores them).
+    pub fn set_thermal(&mut self, thermal: Option<crate::photonic::ThermalConfig>) {
+        let engaging = self.config.photonic.thermal.is_none() && thermal.is_some();
+        self.config.photonic.thermal = thermal;
+        self.upload_params();
+        if engaging {
+            // Reset thermal buffers so the newly-engaged M3TM doesn't see
+            // stale data from a prior thermal run.
+            self.reset_thermal_state();
+            // Also re-upload the LLB tables (they might have changed with a
+            // new preset).
+            let (m_e_data, chi_par_data) = pack_llb_tables(&self.config);
+            self.queue.write_buffer(&self._m_e_table_buf, 0, bytemuck::cast_slice(&m_e_data));
+            self.queue.write_buffer(&self._chi_par_table_buf, 0, bytemuck::cast_slice(&chi_par_data));
+        }
+    }
+
+    /// Reset temp_e, temp_p, m_reduced to the current thermal config's
+    /// ambient / equilibrium values. Called from `set_thermal` and available
+    /// externally as well (e.g., for re-initialising after a sequence).
+    pub fn reset_thermal_state(&mut self) {
+        let t_amb = self
+            .config
+            .photonic
+            .thermal
+            .as_ref()
+            .map(|t| t.t_ambient)
+            .unwrap_or(300.0);
+        let init_t = vec![t_amb; self.cell_count as usize];
+        self.queue.write_buffer(&self.temp_e_buf, 0, bytemuck::cast_slice(&init_t));
+        self.queue.write_buffer(&self.temp_p_buf, 0, bytemuck::cast_slice(&init_t));
+
+        let in_plane = (self.config.geometry.nx * self.config.geometry.ny) as usize;
+        let mut m_red = vec![1.0f32; self.cell_count as usize];
+        if let Some(tc) = &self.config.photonic.thermal {
+            for cell in 0..self.cell_count as usize {
+                let iz = cell / in_plane;
+                if let Some(p) = tc.per_layer.get(iz) {
+                    m_red[cell] = p.sample_m_e(t_amb as f64) as f32;
+                }
+            }
+        }
+        self.queue.write_buffer(&self.m_reduced_buf, 0, bytemuck::cast_slice(&m_red));
+    }
+
+    /// Adjust the shared thermal `t_ambient` without changing presets.
+    /// Cheap — writes only the `thermal_globals` vec4 (offset 672).
+    pub fn set_thermal_ambient(&mut self, t_ambient: f32) {
+        if let Some(tc) = self.config.photonic.thermal.as_mut() {
+            tc.t_ambient = t_ambient;
+        }
+        let data = [t_ambient, 0.0f32, 0.0, 0.0];
+        self.queue.write_buffer(&self.params_buf, 672, bytemuck::cast_slice(&data));
+    }
+
     /// Update external field at runtime. Offset 32 in the new layout.
     pub fn set_b_ext(&mut self, bx: f32, by: f32, bz: f32) {
         self.config.b_ext = [bx as f64, by as f64, bz as f64];

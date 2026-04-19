@@ -8,8 +8,11 @@ use magnonic_clock_sim::config::{Layer, SimConfig};
 use magnonic_clock_sim::gpu::GpuSolver;
 use magnonic_clock_sim::material::BulkMaterial;
 use magnonic_clock_sim::material_thermal;
-use magnonic_clock_sim::photonic::ThermalConfig;
+use magnonic_clock_sim::photonic::{LaserPulse, ThermalConfig};
 use magnonic_clock_sim::substrate::Substrate;
+
+/// Thermal-preset cycling order (matches `material_thermal::for_key`).
+const THERMAL_PRESETS: &[&str] = &["fgt", "fgt-zhou", "ni", "py", "cofeb", "yig"];
 
 #[path = "dashboard_text.rs"]
 mod text;
@@ -209,6 +212,16 @@ fn main() {
     let mut thermal_preset_key: Option<String> = None;
     let mut t_ambient: f32 = 300.0;
 
+    // Pump-pulse defaults for the interactive `L` key (D2). These can be
+    // overridden from the CLI; at runtime the user can still push the
+    // classic transverse-Bx pulse with `P` at a separate strength.
+    let mut pump_fwhm_fs: f64 = 100.0;
+    let mut pump_peak_t: f32 = 0.5;
+    let mut pump_dir: [f32; 3] = [0.0, 0.0, 1.0];
+    let mut pump_fluence_j_m2: Option<f64> = None;
+    let mut pump_reflectivity: f32 = 0.0;
+    let mut pump_delay_ps: f64 = 1.0; // L fires a pulse at t_now + pump_delay_ps
+
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < args.len() {
@@ -279,6 +292,31 @@ fn main() {
                 i += 2;
             }
             "--t-ambient" => { t_ambient = args[i + 1].parse().unwrap(); i += 2; }
+            "--pump-fwhm" => { pump_fwhm_fs = args[i + 1].parse().unwrap(); i += 2; }
+            "--pump-peak" => { pump_peak_t = args[i + 1].parse().unwrap(); i += 2; }
+            "--pump-dir" => {
+                pump_dir = match args[i + 1].as_str() {
+                    "z" | "+z" => [0.0, 0.0, 1.0],
+                    "-z" => [0.0, 0.0, -1.0],
+                    "x" | "+x" => [1.0, 0.0, 0.0],
+                    "-x" => [-1.0, 0.0, 0.0],
+                    "y" | "+y" => [0.0, 1.0, 0.0],
+                    "-y" => [0.0, -1.0, 0.0],
+                    other => {
+                        eprintln!("Unknown --pump-dir: {other}");
+                        std::process::exit(1);
+                    }
+                };
+                i += 2;
+            }
+            "--pump-fluence" => {
+                // mJ/cm² default → J/m²
+                let mj_cm2: f64 = args[i + 1].parse().unwrap();
+                pump_fluence_j_m2 = Some(mj_cm2 * 10.0);
+                i += 2;
+            }
+            "--pump-reflectivity" => { pump_reflectivity = args[i + 1].parse().unwrap(); i += 2; }
+            "--pump-delay" => { pump_delay_ps = args[i + 1].parse().unwrap(); i += 2; }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -466,6 +504,121 @@ fn main() {
             probe_hist.clear();
             eprintln!("CLEAR: plot history");
         }
+        // ── D2 runtime thermal/photonic controls ──────────────────────
+
+        // L — fire an IFE laser pulse at the configured pump params.
+        if window.is_key_pressed(Key::L, KeyRepeat::No) {
+            let t_now = solver.t_sim();
+            let fwhm = pump_fwhm_fs * 1e-15;
+            let mut pulse = LaserPulse::new(t_now + pump_delay_ps * 1e-12, fwhm, pump_peak_t, pump_dir);
+            pulse.peak_fluence = pump_fluence_j_m2;
+            pulse.reflectivity = pump_reflectivity;
+            solver.add_pulse(pulse);
+            let fluence_tag = match pump_fluence_j_m2 {
+                Some(f) => format!(" + {:.3} mJ/cm² (M3TM)", f * 0.1),
+                None => String::new(),
+            };
+            eprintln!(
+                "LASER: t={:.2}+{:.2}ps fwhm={:.0}fs peak={:.2}T dir=({:.1},{:.1},{:.1}){fluence_tag}",
+                t_now * 1e12, pump_delay_ps, pump_fwhm_fs, pump_peak_t,
+                pump_dir[0], pump_dir[1], pump_dir[2],
+            );
+            if !running { running = true; }
+        }
+
+        // T — toggle thermal on/off.
+        if window.is_key_pressed(Key::T, KeyRepeat::No) {
+            if enable_thermal {
+                solver.set_thermal(None);
+                enable_thermal = false;
+                // Leave enable_llb flag alone — re-engages on next T.
+                temp_e_data.clear();
+                temp_p_data.clear();
+                m_red_data.clear();
+                eprintln!("THERMAL: off");
+            } else {
+                let key = thermal_preset_key.as_deref().unwrap_or("fgt");
+                if let Some(preset) = material_thermal::for_key(key) {
+                    let cfg = ThermalConfig {
+                        t_ambient,
+                        per_layer: vec![preset; config.stack.layers.len()],
+                        thermal_dt_cap: 1.0e-15,
+                        thermal_window: (0.5e-12, 10.0e-12),
+                        enable_llb,
+                    };
+                    solver.set_thermal(Some(cfg));
+                    enable_thermal = true;
+                    temp_e_data = solver.readback_temp_e();
+                    m_red_data = solver.readback_m_reduced();
+                    eprintln!("THERMAL: on  preset={key}  T_amb={t_ambient:.0}K  LLB={enable_llb}");
+                } else {
+                    eprintln!("THERMAL: unknown preset {key}");
+                }
+            }
+        }
+
+        // G — toggle LLB within thermal (no-op if thermal is off).
+        if window.is_key_pressed(Key::G, KeyRepeat::No) {
+            enable_llb = !enable_llb;
+            if enable_thermal {
+                let key = thermal_preset_key.as_deref().unwrap_or("fgt");
+                if let Some(preset) = material_thermal::for_key(key) {
+                    let cfg = ThermalConfig {
+                        t_ambient,
+                        per_layer: vec![preset; config.stack.layers.len()],
+                        thermal_dt_cap: 1.0e-15,
+                        thermal_window: (0.5e-12, 10.0e-12),
+                        enable_llb,
+                    };
+                    solver.set_thermal(Some(cfg));
+                    eprintln!("INTEGRATOR: {}", if enable_llb { "LLB" } else { "LLG (+ M3TM observability)" });
+                }
+            } else {
+                eprintln!("INTEGRATOR: enable thermal (T) first to engage LLB");
+            }
+        }
+
+        // [ / ] — T_ambient ∓ 10 K. Only affects the thermal bath; no effect when thermal off.
+        if window.is_key_pressed(Key::LeftBracket, KeyRepeat::Yes) {
+            t_ambient = (t_ambient - 10.0).max(0.0);
+            if enable_thermal { solver.set_thermal_ambient(t_ambient); }
+            eprintln!("T_ambient = {t_ambient:.0} K");
+        }
+        if window.is_key_pressed(Key::RightBracket, KeyRepeat::Yes) {
+            t_ambient = (t_ambient + 10.0).min(5000.0);
+            if enable_thermal { solver.set_thermal_ambient(t_ambient); }
+            eprintln!("T_ambient = {t_ambient:.0} K");
+        }
+
+        // I — cycle thermal preset. Requires thermal to be on; engages with the new preset.
+        if window.is_key_pressed(Key::I, KeyRepeat::No) {
+            let current = thermal_preset_key.as_deref().unwrap_or("fgt");
+            let idx = THERMAL_PRESETS.iter().position(|&k| k == current).unwrap_or(0);
+            let next = THERMAL_PRESETS[(idx + 1) % THERMAL_PRESETS.len()];
+            thermal_preset_key = Some(next.to_string());
+            if enable_thermal {
+                if let Some(preset) = material_thermal::for_key(next) {
+                    let cfg = ThermalConfig {
+                        t_ambient,
+                        per_layer: vec![preset; config.stack.layers.len()],
+                        thermal_dt_cap: 1.0e-15,
+                        thermal_window: (0.5e-12, 10.0e-12),
+                        enable_llb,
+                    };
+                    solver.set_thermal(Some(cfg));
+                    temp_e_data = solver.readback_temp_e();
+                    m_red_data = solver.readback_m_reduced();
+                }
+            }
+            eprintln!("THERMAL PRESET: {next}");
+        }
+
+        // X — clear all queued pulses (cancels mid-pulse).
+        if window.is_key_pressed(Key::X, KeyRepeat::No) {
+            solver.clear_pulses();
+            eprintln!("PULSES: cleared");
+        }
+
         // V — cycle heatmap field. Skips fields unavailable in the current mode.
         if window.is_key_pressed(Key::V, KeyRepeat::No) {
             for _ in 0..all_fields.len() {
@@ -907,10 +1060,11 @@ fn draw_status_panel(
     }
 
     // Footer — abbreviated controls.
-    let footer_y = y0 + h.saturating_sub(3 * text::CELL_H + 4);
-    text::draw_text(buf, stride, total_h, x_label, footer_y, "V:view  P:pulse", 0x666666);
-    text::draw_text(buf, stride, total_h, x_label, footer_y + text::CELL_H, "SPACE:play  C:clear", 0x666666);
-    text::draw_text(buf, stride, total_h, x_label, footer_y + 2 * text::CELL_H, "R/D/U/S/K reset", 0x666666);
+    let footer_y = y0 + h.saturating_sub(4 * text::CELL_H + 4);
+    text::draw_text(buf, stride, total_h, x_label, footer_y, "V:view  L:laser  P:Bx", 0x666666);
+    text::draw_text(buf, stride, total_h, x_label, footer_y + text::CELL_H, "T:thermal  G:LLB  I:preset", 0x666666);
+    text::draw_text(buf, stride, total_h, x_label, footer_y + 2 * text::CELL_H, "[/]:T_amb  X:clear pulses", 0x666666);
+    text::draw_text(buf, stride, total_h, x_label, footer_y + 3 * text::CELL_H, "R/D/U/S/K reset  C:plot", 0x666666);
 }
 
 // ── Colormaps ──────────────────────────────────────────────────────
@@ -961,24 +1115,34 @@ fn sequential_rgb(v: f32, vmin: f32, vmax: f32, hot: bool) -> u32 {
 // ── Help ───────────────────────────────────────────────────────
 
 fn print_controls() {
-    eprintln!("╔══════════════════════════════════════════╗");
-    eprintln!("║  Controls:                               ║");
-    eprintln!("║  Space     Play / Pause                  ║");
-    eprintln!("║  V         Cycle heatmap field           ║");
-    eprintln!("║  P         Fire transverse Bx pulse      ║");
-    eprintln!("║  Left/Right  Pulse strength ±0.5 T       ║");
-    eprintln!("║  A / Z     Increase / decrease alpha     ║");
-    eprintln!("║  B / N     Increase / decrease Bz ±0.1 T ║");
-    eprintln!("║  Up / Down Steps per frame ×2 / ÷2       ║");
-    eprintln!("║  R         Reset: random magnetization   ║");
-    eprintln!("║  D         Reset: stripe domains         ║");
-    eprintln!("║  U         Reset: uniform +z             ║");
-    eprintln!("║  S         Reset: Néel skyrmion seed     ║");
-    eprintln!("║  K         Reset: alternating ±z (syn-AFM)║");
-    eprintln!("║  1/2/3/4   Cycle displayed layer (Nz>1)  ║");
-    eprintln!("║  C         Clear plot history            ║");
-    eprintln!("║  Escape    Quit                          ║");
-    eprintln!("╚══════════════════════════════════════════╝");
+    eprintln!("╔═════════════════════════════════════════════════════════╗");
+    eprintln!("║  Controls:                                              ║");
+    eprintln!("║  Space        Play / Pause                              ║");
+    eprintln!("║  V            Cycle heatmap field                       ║");
+    eprintln!("║                                                         ║");
+    eprintln!("║  ── Pulses ──────                                       ║");
+    eprintln!("║  P            Fire transverse Bx pulse                  ║");
+    eprintln!("║  L            Fire IFE laser pulse (pump params)        ║");
+    eprintln!("║  X            Clear all queued pulses                   ║");
+    eprintln!("║  Left/Right   Pulse strength ±0.5 T (Bx)                ║");
+    eprintln!("║                                                         ║");
+    eprintln!("║  ── Thermal / integrator ──                             ║");
+    eprintln!("║  T            Toggle thermal M3TM                       ║");
+    eprintln!("║  G            Toggle LLB (within thermal)               ║");
+    eprintln!("║  I            Cycle thermal preset                      ║");
+    eprintln!("║  [ / ]        T_ambient ∓ 10 K                          ║");
+    eprintln!("║                                                         ║");
+    eprintln!("║  ── Sweeps / magnet controls ──                         ║");
+    eprintln!("║  A / Z        α ×1.5 / ÷1.5                             ║");
+    eprintln!("║  B / N        Bz ±0.1 T                                 ║");
+    eprintln!("║  Up / Down    Steps per frame ×2 / ÷2                   ║");
+    eprintln!("║                                                         ║");
+    eprintln!("║  ── Init / display ──                                   ║");
+    eprintln!("║  R  D  U  S  K  Reset: rand/stripe/unif/skyrmion/±z AFM ║");
+    eprintln!("║  1/2/3/4      Cycle displayed layer (Nz>1)              ║");
+    eprintln!("║  C            Clear plot history                        ║");
+    eprintln!("║  Escape       Quit                                      ║");
+    eprintln!("╚═════════════════════════════════════════════════════════╝");
 }
 
 fn print_help() {
@@ -997,6 +1161,14 @@ fn print_help() {
     eprintln!("  --enable-llb               engage LLB integrator (implies --enable-thermal)");
     eprintln!("  --thermal-preset KEY       ni | py | fgt | fgt-zhou | yig | cofeb (default fgt)");
     eprintln!("  --t-ambient K              ambient bath temperature (default 300)");
+    eprintln!();
+    eprintln!("Pump pulse for the interactive `L` key (D2):");
+    eprintln!("  --pump-fwhm FS             temporal FWHM [fs]   (default 100)");
+    eprintln!("  --pump-peak T              IFE peak field [T]    (default 0.5)");
+    eprintln!("  --pump-dir x|y|z|-x|-y|-z  polarisation          (default z)");
+    eprintln!("  --pump-fluence MJ_CM2      absorbed fluence — engages M3TM source");
+    eprintln!("  --pump-reflectivity F      reflectivity 0..1     (default 0)");
+    eprintln!("  --pump-delay PS            fire at t_now + delay (default 1.0)");
     eprintln!();
     eprintln!("Example: YIG/FGT bilayer dashboard with thermal dynamics:");
     eprintln!("  magnonic-dashboard --stack yig:2,fgt-bulk:0.7 --interlayer-a 4e-13 \\");
