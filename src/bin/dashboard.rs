@@ -221,6 +221,8 @@ fn main() {
     let mut pump_fluence_j_m2: Option<f64> = None;
     let mut pump_reflectivity: f32 = 0.0;
     let mut pump_delay_ps: f64 = 1.0; // L fires a pulse at t_now + pump_delay_ps
+    // Grid mode: show all 8 heatmap fields simultaneously.
+    let mut grid_mode = false;
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -317,6 +319,7 @@ fn main() {
             }
             "--pump-reflectivity" => { pump_reflectivity = args[i + 1].parse().unwrap(); i += 2; }
             "--pump-delay" => { pump_delay_ps = args[i + 1].parse().unwrap(); i += 2; }
+            "--grid" | "-g" => { grid_mode = true; i += 1; }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -346,12 +349,31 @@ fn main() {
 
     let nx = config.geometry.nx as usize;
     let ny = config.geometry.ny as usize;
-    let win_w = nx.max(MIN_WIN_W);
-    let win_h = ny.max(240) + PLOT_HEIGHT + LABEL_HEIGHT;
-    // Effective heatmap rows: always ny (may be smaller than plot_start_y).
-    let plot_start_y = ny.max(240) + LABEL_HEIGHT;
-    let side_panel_x = nx + 8; // 8-px gap between heatmap and status panel
-    let heatmap_h = ny.max(240);
+
+    // ── Layout ─────────────────────────────────────────────────────
+    // Single mode: one big heatmap left, status panel right.
+    // Grid mode:   4×2 tile of mini-heatmaps replaces the big heatmap.
+    //
+    // Grid geometry:
+    //   Each tile = nx × ny pixels + LABEL_HEIGHT text strip above.
+    //   4 cols × 2 rows with `GRID_GAP` px between tiles.
+    //   Overall heatmap region = 4·nx + 3·GAP  wide × 2·(ny + LABEL) + GAP tall.
+    const GRID_GAP: usize = 6;
+    const GRID_COLS: usize = 4;
+    const GRID_ROWS: usize = 2;
+
+    let (heatmap_region_w, heatmap_region_h) = if grid_mode {
+        let w = GRID_COLS * nx + (GRID_COLS - 1) * GRID_GAP;
+        let h = GRID_ROWS * (ny + LABEL_HEIGHT) + (GRID_ROWS - 1) * GRID_GAP;
+        (w, h)
+    } else {
+        (nx, ny.max(240))
+    };
+    let win_w = (heatmap_region_w + 8 + 260).max(MIN_WIN_W); // heatmap + gap + status
+    let win_h = heatmap_region_h + LABEL_HEIGHT + PLOT_HEIGHT;
+    let plot_start_y = heatmap_region_h + LABEL_HEIGHT;
+    let side_panel_x = heatmap_region_w + 8;
+    let heatmap_h = heatmap_region_h;
 
     let mut window = Window::new(
         "Magnonic Clock Simulator",
@@ -709,17 +731,82 @@ fn main() {
             kspace.as_ref(),
             nx, ny, display_layer as usize, t_ambient,
         );
-        draw_heatmap(
-            &mut framebuf, win_w, win_h, field,
-            &mag_data, &temp_e_data, &temp_p_data, &m_red_data,
-            kspace.as_ref(),
-            nx, ny, display_layer as usize, field_min, field_max,
-        );
+
+        if grid_mode {
+            // Grid layout order — top row = real-space magnetization;
+            // bottom row = thermal & k-space views. Independent of V-cycle order.
+            let grid_fields: [HeatmapField; 8] = [
+                HeatmapField::Mz, HeatmapField::Mx, HeatmapField::My, HeatmapField::MMag,
+                HeatmapField::TeK, HeatmapField::TpK, HeatmapField::MReduced, HeatmapField::KspacePower,
+            ];
+            text::fill_rect(&mut framebuf, win_w, win_h, 0, 0, heatmap_region_w, heatmap_region_h, 0x0a0a0a);
+            // k-space tile is always visible in grid mode — always compute when running.
+            if running {
+                let eng = kspace.get_or_insert_with(|| KspaceEngine::new(nx, ny));
+                eng.compute(&mag_data, display_layer as usize);
+            }
+            // temp_p tile is always visible in grid mode — always read it back.
+            if enable_thermal {
+                temp_p_data = solver.readback_temp_p();
+            }
+            for (slot, &f) in grid_fields.iter().enumerate() {
+                let col = slot % GRID_COLS;
+                let row = slot / GRID_COLS;
+                let tile_x0 = col * (nx + GRID_GAP);
+                let tile_y0 = row * (ny + LABEL_HEIGHT + GRID_GAP);
+                // Label strip above the tile.
+                text::fill_rect(&mut framebuf, win_w, win_h, tile_x0, tile_y0, nx, LABEL_HEIGHT, 0x111111);
+                let label_color = if f == field { 0xFFEE99 } else { 0xAAAAAA };
+                text::draw_text(
+                    &mut framebuf, win_w, win_h,
+                    tile_x0 + 2, tile_y0 + 3,
+                    f.label(), label_color,
+                );
+                // Tile body. Thermal fields dim when thermal is off.
+                let dim = f.requires_thermal() && !enable_thermal;
+                let (fmin, fmax) = field_range(
+                    f, &mag_data, &temp_e_data, &temp_p_data, &m_red_data,
+                    kspace.as_ref(),
+                    nx, ny, display_layer as usize, t_ambient,
+                );
+                draw_heatmap_tile(
+                    &mut framebuf, win_w, win_h,
+                    tile_x0, tile_y0 + LABEL_HEIGHT,
+                    f, &mag_data, &temp_e_data, &temp_p_data, &m_red_data,
+                    kspace.as_ref(),
+                    nx, ny, display_layer as usize, fmin, fmax, dim,
+                );
+                // Highlight focused tile with a 1-px border.
+                if f == field {
+                    draw_tile_border(&mut framebuf, win_w, win_h, tile_x0, tile_y0 + LABEL_HEIGHT, nx, ny, 0xFFEE99);
+                }
+            }
+            // Fill gap column between grid region and status panel.
+            for y in 0..heatmap_region_h.min(win_h) {
+                for x in heatmap_region_w..side_panel_x.min(win_w) {
+                    framebuf[y * win_w + x] = 0x0f0f0f;
+                }
+            }
+        } else {
+            draw_heatmap_tile(
+                &mut framebuf, win_w, win_h,
+                0, 0,
+                field, &mag_data, &temp_e_data, &temp_p_data, &m_red_data,
+                kspace.as_ref(),
+                nx, ny, display_layer as usize, field_min, field_max, false,
+            );
+            // Fill gap between heatmap and status panel (single mode).
+            for y in 0..ny.min(win_h) {
+                for x in nx..side_panel_x.min(win_w) {
+                    framebuf[y * win_w + x] = 0x0f0f0f;
+                }
+            }
+        }
         draw_status_panel(
             &mut framebuf, win_w, win_h,
             side_panel_x, 0, win_w.saturating_sub(side_panel_x), heatmap_h,
             &obs, field, field_min, field_max,
-            enable_thermal, enable_llb,
+            enable_thermal, enable_llb, grid_mode,
             alpha, b_ext_x, b_ext_z,
             pulse_frames_left, pulse_strength,
             display_layer, nz,
@@ -826,13 +913,37 @@ fn push_trim(v: &mut Vec<f32>, val: f32, max: usize) {
 
 // ── Rendering ──────────────────────────────────────────────────────
 
-fn draw_heatmap(
+fn draw_tile_border(
     buf: &mut [u32], stride: usize, total_h: usize,
+    x0: usize, y0: usize, w: usize, h: usize, color: u32,
+) {
+    for dx in 0..w {
+        let x = x0 + dx;
+        if x < stride {
+            if y0 < total_h { buf[y0 * stride + x] = color; }
+            let yb = y0 + h.saturating_sub(1);
+            if yb < total_h { buf[yb * stride + x] = color; }
+        }
+    }
+    for dy in 0..h {
+        let y = y0 + dy;
+        if y < total_h {
+            if x0 < stride { buf[y * stride + x0] = color; }
+            let xr = x0 + w.saturating_sub(1);
+            if xr < stride { buf[y * stride + xr] = color; }
+        }
+    }
+}
+
+fn draw_heatmap_tile(
+    buf: &mut [u32], stride: usize, total_h: usize,
+    tile_x0: usize, tile_y0: usize,
     field: HeatmapField,
     mag: &[f32], te: &[f32], tp: &[f32], mr: &[f32],
     kspace: Option<&KspaceEngine>,
     nx: usize, ny: usize, display_layer: usize,
     field_min: f32, field_max: f32,
+    dim: bool, // true = greyscale-ish / low-contrast, used when a thermal field is inactive
 ) {
     let layer_offset = display_layer * nx * ny;
     let signed = field.signed();
@@ -845,24 +956,18 @@ fn draw_heatmap(
                 let cell = layer_offset + ix * ny + iy;
                 field_sample(field, mag, te, tp, mr, cell)
             };
-            let color = if signed {
+            let color = if dim {
+                0x202020 // uniform dim grey for inactive thermal tiles
+            } else if signed {
                 diverging_rgb(v, field_min, field_max)
             } else {
-                // k-space uses a hot-style ramp too (high power = bright).
                 let hot = matches!(field, HeatmapField::TeK | HeatmapField::TpK | HeatmapField::KspacePower);
                 sequential_rgb(v, field_min, field_max, hot)
             };
-            if iy < total_h && ix < stride {
-                buf[iy * stride + ix] = color;
-            }
-        }
-    }
-    // Fill gap column between heatmap and status panel with dark gray.
-    let panel_start = nx + 8;
-    if nx < stride {
-        for y in 0..ny.min(total_h) {
-            for x in nx..panel_start.min(stride) {
-                buf[y * stride + x] = 0x0f0f0f;
+            let x = tile_x0 + ix;
+            let y = tile_y0 + iy;
+            if y < total_h && x < stride {
+                buf[y * stride + x] = color;
             }
         }
     }
@@ -945,7 +1050,7 @@ fn draw_status_panel(
     x0: usize, y0: usize, w: usize, h: usize,
     obs: &magnonic_clock_sim::gpu::Observables,
     field: HeatmapField, field_min: f32, field_max: f32,
-    thermal_on: bool, llb_on: bool,
+    thermal_on: bool, llb_on: bool, grid_mode: bool,
     alpha: f32, b_ext_x: f32, b_ext_z: f32,
     pulse_frames_left: u32, pulse_strength: f32,
     display_layer: u32, nz: u32,
@@ -983,6 +1088,11 @@ fn draw_status_panel(
     text::draw_text(buf, stride, total_h, x_label + 6 + integrator.len() * text::CELL_W, y, "]", 0x666666);
     text::draw_text(buf, stride, total_h, x_label + 6 + (integrator.len() + 2) * text::CELL_W, y, &thermal_tag, label_color);
     y += text::CELL_H + 2;
+    if grid_mode {
+        text::draw_text(buf, stride, total_h, x_label, y, "grid view", 0x88AACC);
+        text::draw_text(buf, stride, total_h, x_label + 11 * text::CELL_W, y, "(focus: V to cycle)", 0x666666);
+        y += text::CELL_H + 2;
+    }
 
     // Separator line
     for dx in 0..w.saturating_sub(12) {
@@ -1161,6 +1271,10 @@ fn print_help() {
     eprintln!("  --enable-llb               engage LLB integrator (implies --enable-thermal)");
     eprintln!("  --thermal-preset KEY       ni | py | fgt | fgt-zhou | yig | cofeb (default fgt)");
     eprintln!("  --t-ambient K              ambient bath temperature (default 300)");
+    eprintln!();
+    eprintln!("Layout:");
+    eprintln!("  --grid / -g                grid-mode layout: all 8 heatmap fields shown");
+    eprintln!("                             at once (4×2 tiles). V highlights focus tile.");
     eprintln!();
     eprintln!("Pump pulse for the interactive `L` key (D2):");
     eprintln!("  --pump-fwhm FS             temporal FWHM [fs]   (default 100)");
