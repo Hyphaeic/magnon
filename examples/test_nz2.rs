@@ -24,6 +24,7 @@ fn main() {
         b_ext: [0.0, 0.0, 0.0],
         stab_coeff: 1.0e11,
         j_current: [0.0, 0.0, 0.0],
+        photonic: Default::default(),
         readback_interval: 500,
         total_steps: 3000,
         probe_idx: None,

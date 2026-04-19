@@ -55,7 +55,7 @@ use magnonic_clock_sim::config::{Geometry, SimConfig, Stack};
 use magnonic_clock_sim::gpu::GpuSolver;
 use magnonic_clock_sim::material::BulkMaterial;
 use magnonic_clock_sim::material_thermal;
-use magnonic_clock_sim::photonic::{parse_pulse_spec, LayerThermalParams, ThermalConfig};
+use magnonic_clock_sim::photonic::{parse_pulse_spec, ThermalConfig};
 use magnonic_clock_sim::substrate::Substrate;
 
 // ─── Fixed operating point ───────────────────────────────
@@ -243,14 +243,6 @@ fn main() {
         best.demag_frac * 100.0, best.recovery_frac * 100.0,
     );
 
-    // Emit a ready-to-paste Rust snippet for fgt_calibrated().
-    let ni_default = LayerThermalParams {
-        gamma_e: 0.0, c_p: 0.0, g_ep: 0.0, g_sub_phonon: 0.0, a_sf: 0.0,
-        mu_atom_bohr: 0.0, v_atom: 0.0, theta_d: 0.0, t_c: 0.0, alpha_0: 0.0,
-        llb_table_n: 0, m_e_table: vec![], chi_par_table: vec![],
-        tau_long_base: 0.0, notes: "",
-    };
-    let _ = ni_default; // suppress unused if preset format changes
     println!();
     println!("--- Ready-to-paste preset update (src/material_thermal.rs) ---");
     println!("// FGT — Zhou 2025 calibrated (T = {} K, B = 1 T, F = 0.24 mJ/cm² morphology fit)", T_AMBIENT_K);

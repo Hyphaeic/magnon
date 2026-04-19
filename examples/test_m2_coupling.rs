@@ -29,6 +29,7 @@ fn run_case(
         b_ext: [0.0, 0.0, 0.0],
         stab_coeff: 1.0e11,
         j_current: [0.0, 0.0, 0.0],
+        photonic: Default::default(),
         readback_interval: interval,
         total_steps: steps,
         probe_idx: None,

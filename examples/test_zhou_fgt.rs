@@ -32,6 +32,7 @@ use magnonic_clock_sim::photonic::{parse_pulse_spec, ThermalConfig};
 use magnonic_clock_sim::substrate::Substrate;
 
 #[derive(Clone, Copy, Debug)]
+#[allow(dead_code)] // printed for the reader via `print_trace`, not consumed programmatically
 struct TrialResult {
     demag_frac: f64,
     t_min_ps: f64,

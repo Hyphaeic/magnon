@@ -350,18 +350,27 @@ pub struct GpuSolver {
 
     params_buf: wgpu::Buffer,
     mag_buf: wgpu::Buffer,
-    mag_pred_buf: wgpu::Buffer,
-    h_eff_buf: wgpu::Buffer,
-    torque_0_buf: wgpu::Buffer,
-    torque_1_buf: wgpu::Buffer,
+
+    // Buffers below are bound via `bind_group` but never touched through
+    // the solver handle after creation — they exist to keep wgpu's buffer
+    // handles alive for the bind group. The compiler can't see that and
+    // would warn; the `_` prefix silences that cleanly.
+    _mag_pred_buf: wgpu::Buffer,
+    _h_eff_buf: wgpu::Buffer,
+    _torque_0_buf: wgpu::Buffer,
+    _torque_1_buf: wgpu::Buffer,
 
     // Phase P3 thermal buffers — always allocated to keep the BGL stable,
     // but only dispatched to when `config.photonic.thermal.is_some()`.
     temp_e_buf: wgpu::Buffer,
     temp_p_buf: wgpu::Buffer,
     m_reduced_buf: wgpu::Buffer,
-    m_e_table_buf: wgpu::Buffer,
-    chi_par_table_buf: wgpu::Buffer,
+    // Table buffers are bound through `bind_group`; no direct writes after
+    // creation. Hence the `_` prefix. `chi_par_table` is currently unused
+    // by the shader but retained for a future full-Atxitia LLB upgrade —
+    // see docs/zhou_fgt_calibration.md §6.
+    _m_e_table_buf: wgpu::Buffer,
+    _chi_par_table_buf: wgpu::Buffer,
 
     mag_staging: wgpu::Buffer,
     temp_e_staging: wgpu::Buffer,
@@ -636,15 +645,15 @@ impl GpuSolver {
             queue,
             params_buf,
             mag_buf,
-            mag_pred_buf,
-            h_eff_buf,
-            torque_0_buf,
-            torque_1_buf,
+            _mag_pred_buf: mag_pred_buf,
+            _h_eff_buf: h_eff_buf,
+            _torque_0_buf: torque_0_buf,
+            _torque_1_buf: torque_1_buf,
             temp_e_buf,
             temp_p_buf,
             m_reduced_buf,
-            m_e_table_buf,
-            chi_par_table_buf,
+            _m_e_table_buf: m_e_table_buf,
+            _chi_par_table_buf: chi_par_table_buf,
             mag_staging,
             temp_e_staging,
             m_reduced_staging,
