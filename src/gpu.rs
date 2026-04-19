@@ -839,6 +839,12 @@ impl GpuSolver {
         self.readback_f32_scalar(&self.m_reduced_buf, &self.m_reduced_staging)
     }
 
+    /// Readback `temp_p` (K, per cell). Reuses the temp_e staging buffer
+    /// because scalar readbacks are serialised through the GPU queue.
+    pub fn readback_temp_p(&self) -> Vec<f32> {
+        self.readback_f32_scalar(&self.temp_p_buf, &self.temp_e_staging)
+    }
+
     fn readback_f32_scalar(&self, src: &wgpu::Buffer, staging: &wgpu::Buffer) -> Vec<f32> {
         let mut encoder = self.device.create_command_encoder(&Default::default());
         encoder.copy_buffer_to_buffer(src, 0, staging, 0, staging.size());

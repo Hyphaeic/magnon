@@ -5,7 +5,12 @@ use minifb::{Key, KeyRepeat, Window, WindowOptions};
 use magnonic_clock_sim::config::{Layer, SimConfig};
 use magnonic_clock_sim::gpu::GpuSolver;
 use magnonic_clock_sim::material::BulkMaterial;
+use magnonic_clock_sim::material_thermal;
+use magnonic_clock_sim::photonic::ThermalConfig;
 use magnonic_clock_sim::substrate::Substrate;
+
+#[path = "dashboard_text.rs"]
+mod text;
 
 fn parse_stack(spec: &str) -> Result<Vec<Layer>, String> {
     spec.split(',').map(|entry| {
@@ -27,11 +32,63 @@ fn parse_f64_list(s: &str) -> Result<Vec<f64>, String> {
 
 const PLOT_HEIGHT: usize = 200;
 const LABEL_HEIGHT: usize = 14;
+/// Minimum window width — leaves room for a status panel when the grid is small.
+const MIN_WIN_W: usize = 640;
+
+// ── Heatmap fields ────────────────────────────────────────────────
+//
+// Phase D1 addition: the heatmap can visualize more than just m_z. Users
+// cycle through the available fields with the `V` key; thermal-only fields
+// are skipped when `thermal` is disabled.
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HeatmapField {
+    Mz,
+    Mx,
+    My,
+    MMag,      // |m|
+    TeK,       // electron temperature [K]
+    TpK,       // phonon temperature [K]
+    MReduced,  // M3TM's m_reduced (mirrors |mag| under LLB back-coupling)
+}
+
+impl HeatmapField {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Mz => "Mz",
+            Self::Mx => "Mx",
+            Self::My => "My",
+            Self::MMag => "|m|",
+            Self::TeK => "Te",
+            Self::TpK => "Tp",
+            Self::MReduced => "m_red",
+        }
+    }
+    fn units(self) -> &'static str {
+        match self {
+            Self::TeK | Self::TpK => "K",
+            _ => "",
+        }
+    }
+    fn requires_thermal(self) -> bool {
+        matches!(self, Self::TeK | Self::TpK | Self::MReduced)
+    }
+    fn signed(self) -> bool {
+        matches!(self, Self::Mz | Self::Mx | Self::My)
+    }
+}
 
 fn main() {
     env_logger::init();
 
     let mut config = SimConfig::fgt_default(256, 256);
+
+    // Thermal CLI state — built incrementally while parsing args.
+    let mut enable_thermal = false;
+    let mut enable_llb = false;
+    let mut thermal_preset_key: Option<String> = None;
+    let mut t_ambient: f32 = 300.0;
+
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < args.len() {
@@ -94,15 +151,49 @@ fn main() {
             "--alpha" => { config.stack.layers[0].material.alpha_bulk = args[i + 1].parse().unwrap(); i += 2; }
             "--bz" => { config.b_ext[2] = args[i + 1].parse().unwrap(); i += 2; }
             "--dt" => { config.dt = args[i + 1].parse().unwrap(); i += 2; }
+            "--enable-thermal" => { enable_thermal = true; i += 1; }
+            "--enable-llb" => { enable_thermal = true; enable_llb = true; i += 1; }
+            "--thermal-preset" | "--thermal-params-for" => {
+                thermal_preset_key = Some(args[i + 1].clone());
+                enable_thermal = true;
+                i += 2;
+            }
+            "--t-ambient" => { t_ambient = args[i + 1].parse().unwrap(); i += 2; }
+            "--help" | "-h" => {
+                print_help();
+                std::process::exit(0);
+            }
             _ => { i += 1; }
         }
     }
+
+    // Attach thermal config if requested.
+    if enable_thermal {
+        let key = thermal_preset_key.as_deref().unwrap_or("fgt");
+        let preset = material_thermal::for_key(key).unwrap_or_else(|| {
+            eprintln!("Unknown --thermal-preset: {key}");
+            std::process::exit(1);
+        });
+        let per_layer = vec![preset; config.stack.layers.len()];
+        config.photonic.thermal = Some(ThermalConfig {
+            t_ambient,
+            per_layer,
+            thermal_dt_cap: 1.0e-15,
+            thermal_window: (0.5e-12, 10.0e-12),
+            enable_llb,
+        });
+    }
+
     config.print_summary();
 
     let nx = config.geometry.nx as usize;
     let ny = config.geometry.ny as usize;
-    let win_w = nx.max(512);
-    let win_h = ny + PLOT_HEIGHT + LABEL_HEIGHT;
+    let win_w = nx.max(MIN_WIN_W);
+    let win_h = ny.max(240) + PLOT_HEIGHT + LABEL_HEIGHT;
+    // Effective heatmap rows: always ny (may be smaller than plot_start_y).
+    let plot_start_y = ny.max(240) + LABEL_HEIGHT;
+    let side_panel_x = nx + 8; // 8-px gap between heatmap and status panel
+    let heatmap_h = ny.max(240);
 
     let mut window = Window::new(
         "Magnonic Clock Simulator",
@@ -122,7 +213,7 @@ fn main() {
     let mut framebuf = vec![0x1a1a1au32; win_w * win_h];
     let mut running = false;
     let mut steps_per_frame: usize = 100;
-    let mut display_layer: u32 = 0;        // Which layer's heatmap to show
+    let mut display_layer: u32 = 0;
     let nz = config.nz();
 
     // Live parameters
@@ -133,9 +224,9 @@ fn main() {
     // Transverse pulse state
     let mut pulse_strength = 1.0f32; // Tesla
     let mut pulse_frames_left = 0u32;
-    let pulse_duration = 5u32; // frames (at 100 steps/frame = 500 steps = 50 ps)
+    let pulse_duration = 5u32;
 
-    // History for plot strip
+    // History (plot strip)
     let mut mz_hist: Vec<f32> = Vec::new();
     let mut mx_hist: Vec<f32> = Vec::new();
     let mut my_hist: Vec<f32> = Vec::new();
@@ -145,32 +236,32 @@ fn main() {
 
     // Initial readback
     let mut mag_data = solver.readback_mag();
+    let mut temp_e_data: Vec<f32> = Vec::new();
+    let mut temp_p_data: Vec<f32> = Vec::new();
+    let mut m_red_data: Vec<f32> = Vec::new();
+    if enable_thermal {
+        temp_e_data = solver.readback_temp_e();
+        m_red_data = solver.readback_m_reduced();
+    }
 
-    eprintln!("╔══════════════════════════════════════════╗");
-    eprintln!("║  Controls:                               ║");
-    eprintln!("║  Space     Play / Pause                  ║");
-    eprintln!("║  P         Fire transverse Bx pulse      ║");
-    eprintln!("║  Left/Right  Pulse strength ±0.5 T       ║");
-    eprintln!("║  A / Z     Increase / decrease alpha      ║");
-    eprintln!("║  B / N     Increase / decrease Bz ±0.1 T ║");
-    eprintln!("║  Up / Down Steps per frame ×2 / ÷2       ║");
-    eprintln!("║  R         Reset: random magnetization    ║");
-    eprintln!("║  D         Reset: stripe domains          ║");
-    eprintln!("║  U         Reset: uniform +z              ║");
-    eprintln!("║  S         Reset: Néel skyrmion seed      ║");
-    eprintln!("║  K         Reset: alternating ±z (syn-AFM)║");
-    eprintln!("║  1/2/3/4   Cycle displayed layer (Nz>1)   ║");
-    eprintln!("║  C         Clear plot history             ║");
-    eprintln!("║  Escape    Quit                           ║");
-    eprintln!("╚══════════════════════════════════════════╝");
+    // Field cycling (D1)
+    let all_fields: &[HeatmapField] = &[
+        HeatmapField::Mz,
+        HeatmapField::Mx,
+        HeatmapField::My,
+        HeatmapField::MMag,
+        HeatmapField::TeK,
+        HeatmapField::TpK,
+        HeatmapField::MReduced,
+    ];
+    let mut field_idx = 0usize;
+
+    print_controls();
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
         let t0 = Instant::now();
 
-        // ── Input ──────────────────────────────────────────────
-        if window.is_key_pressed(Key::Space, KeyRepeat::No) {
-            running = !running;
-        }
+        if window.is_key_pressed(Key::Space, KeyRepeat::No) { running = !running; }
         if window.is_key_pressed(Key::Up, KeyRepeat::Yes) {
             steps_per_frame = (steps_per_frame * 2).min(10_000);
             eprintln!("steps/frame = {steps_per_frame}");
@@ -179,8 +270,6 @@ fn main() {
             steps_per_frame = (steps_per_frame / 2).max(1);
             eprintln!("steps/frame = {steps_per_frame}");
         }
-
-        // Damping
         if window.is_key_pressed(Key::A, KeyRepeat::Yes) {
             alpha = (alpha * 1.5).min(1.0);
             solver.set_alpha(alpha);
@@ -191,8 +280,6 @@ fn main() {
             solver.set_alpha(alpha);
             eprintln!("alpha = {alpha:.6}");
         }
-
-        // External field z
         if window.is_key_pressed(Key::B, KeyRepeat::Yes) {
             b_ext_z += 0.1;
             solver.set_b_ext(b_ext_x, 0.0, b_ext_z);
@@ -203,14 +290,12 @@ fn main() {
             solver.set_b_ext(b_ext_x, 0.0, b_ext_z);
             eprintln!("Bz = {b_ext_z:.2} T");
         }
-
-        // Transverse pulse
         if window.is_key_pressed(Key::P, KeyRepeat::No) {
             pulse_frames_left = pulse_duration;
             b_ext_x = pulse_strength;
             solver.set_b_ext(b_ext_x, 0.0, b_ext_z);
             eprintln!("PULSE: Bx = {pulse_strength:.1} T for {pulse_duration} frames");
-            if !running { running = true; } // auto-start on pulse
+            if !running { running = true; }
         }
         if window.is_key_pressed(Key::Right, KeyRepeat::Yes) {
             pulse_strength = (pulse_strength + 0.5).min(10.0);
@@ -220,8 +305,6 @@ fn main() {
             pulse_strength = (pulse_strength - 0.5).max(0.1);
             eprintln!("pulse strength = {pulse_strength:.1} T");
         }
-
-        // Reset states
         if window.is_key_pressed(Key::R, KeyRepeat::No) {
             solver.reset_random();
             mag_data = solver.readback_mag();
@@ -238,7 +321,6 @@ fn main() {
             eprintln!("RESET: uniform +z");
         }
         if window.is_key_pressed(Key::S, KeyRepeat::No) {
-            // Skyrmion radius ≈ 1/6 of smaller grid dimension
             let nx_f = config.geometry.nx as f64;
             let ny_f = config.geometry.ny as f64;
             let dx_nm = config.geometry.cell_size * 1e9;
@@ -259,12 +341,19 @@ fn main() {
             probe_hist.clear();
             eprintln!("CLEAR: plot history");
         }
-        // Layer cycling — keys 1..4 select which layer's heatmap is shown
+        // V — cycle heatmap field. Skips fields unavailable in the current mode.
+        if window.is_key_pressed(Key::V, KeyRepeat::No) {
+            for _ in 0..all_fields.len() {
+                field_idx = (field_idx + 1) % all_fields.len();
+                if !all_fields[field_idx].requires_thermal() || enable_thermal {
+                    break;
+                }
+            }
+            eprintln!("VIEW: {}", all_fields[field_idx].label());
+        }
         for (key, layer) in [
-            (Key::Key1, 0u32),
-            (Key::Key2, 1u32),
-            (Key::Key3, 2u32),
-            (Key::Key4, 3u32),
+            (Key::Key1, 0u32), (Key::Key2, 1u32),
+            (Key::Key3, 2u32), (Key::Key4, 3u32),
         ] {
             if window.is_key_pressed(key, KeyRepeat::No) && layer < nz {
                 display_layer = layer;
@@ -272,7 +361,7 @@ fn main() {
             }
         }
 
-        // ── Pulse countdown ────────────────────────────────────
+        // Pulse countdown
         if pulse_frames_left > 0 {
             pulse_frames_left -= 1;
             if pulse_frames_left == 0 {
@@ -282,50 +371,133 @@ fn main() {
             }
         }
 
-        // ── Simulate ───────────────────────────────────────────
+        // Simulate
         if running {
             solver.step_n(steps_per_frame);
             mag_data = solver.readback_mag();
+            if enable_thermal {
+                temp_e_data = solver.readback_temp_e();
+                m_red_data = solver.readback_m_reduced();
+                // Only read temp_p when currently visualising it — three
+                // full-cell readbacks per frame is fine but four costs
+                // ~0.5 ms at 256² on the RTX 4060.
+                if all_fields[field_idx] == HeatmapField::TpK {
+                    temp_p_data = solver.readback_temp_p();
+                }
+            }
             let obs = solver.observables();
 
-            // Push history
             push_trim(&mut mz_hist, obs.avg_mz, win_w);
             push_trim(&mut mx_hist, obs.avg_mx, win_w);
             push_trim(&mut my_hist, obs.avg_my, win_w);
             push_trim(&mut probe_hist, obs.probe_mz, win_w);
 
             let dt = t0.elapsed().as_secs_f64();
-            if dt > 0.0 {
-                steps_per_sec = steps_per_frame as f64 / dt;
-            }
+            if dt > 0.0 { steps_per_sec = steps_per_frame as f64 / dt; }
 
             let pulse_tag = if pulse_frames_left > 0 {
                 format!(" | PULSE Bx={b_ext_x:.1}T [{pulse_frames_left}]")
-            } else {
-                String::new()
-            };
-
+            } else { String::new() };
             let layer_tag = if nz > 1 {
                 format!(" | Layer {}/{}", display_layer, nz)
-            } else {
-                String::new()
-            };
+            } else { String::new() };
             window.set_title(&format!(
                 "Step {} | {:.1}ps | Mz={:.4} | probe={:.4} | α={:.4} | Bz={:.1}T{}{} | {:.0}st/s | {}/fr",
                 obs.step, obs.time_ps, obs.avg_mz, obs.probe_mz,
                 alpha, b_ext_z, pulse_tag, layer_tag, steps_per_sec, steps_per_frame,
             ));
         }
+        let obs = solver.observables();
 
         // ── Render ─────────────────────────────────────────────
-        draw_heatmap(&mut framebuf, &mag_data, nx, ny, win_w, display_layer as usize);
-        draw_label_bar(&mut framebuf, win_w, ny, LABEL_HEIGHT, pulse_frames_left > 0);
+        // Background (heatmap left column) is overwritten by draw_heatmap;
+        // the rest is painted by the panel / label / plot draws.
+        let field = all_fields[field_idx];
+        let (field_min, field_max) = field_range(
+            field, &mag_data, &temp_e_data, &temp_p_data, &m_red_data,
+            nx, ny, display_layer as usize, t_ambient,
+        );
+        draw_heatmap(
+            &mut framebuf, win_w, win_h, field,
+            &mag_data, &temp_e_data, &temp_p_data, &m_red_data,
+            nx, ny, display_layer as usize, field_min, field_max,
+        );
+        draw_status_panel(
+            &mut framebuf, win_w, win_h,
+            side_panel_x, 0, win_w.saturating_sub(side_panel_x), heatmap_h,
+            &obs, field, field_min, field_max,
+            enable_thermal, enable_llb,
+            alpha, b_ext_x, b_ext_z,
+            pulse_frames_left, pulse_strength,
+            display_layer, nz,
+            steps_per_frame, steps_per_sec,
+            t_ambient,
+        );
+        draw_label_bar(&mut framebuf, win_w, win_h, plot_start_y - LABEL_HEIGHT, LABEL_HEIGHT, pulse_frames_left > 0);
         draw_plot_strip(
-            &mut framebuf, win_w, ny + LABEL_HEIGHT, PLOT_HEIGHT,
+            &mut framebuf, win_w, win_h, plot_start_y, PLOT_HEIGHT,
             &mz_hist, &mx_hist, &my_hist, &probe_hist,
         );
 
         window.update_with_buffer(&framebuf, win_w, win_h).unwrap();
+    }
+}
+
+// ── Field access + range ───────────────────────────────────────────
+
+fn field_sample(
+    field: HeatmapField,
+    mag: &[f32], te: &[f32], tp: &[f32], mr: &[f32],
+    cell: usize,
+) -> f32 {
+    match field {
+        HeatmapField::Mz => mag.get(cell * 4 + 2).copied().unwrap_or(0.0),
+        HeatmapField::Mx => mag.get(cell * 4).copied().unwrap_or(0.0),
+        HeatmapField::My => mag.get(cell * 4 + 1).copied().unwrap_or(0.0),
+        HeatmapField::MMag => {
+            let x = mag.get(cell * 4).copied().unwrap_or(0.0);
+            let y = mag.get(cell * 4 + 1).copied().unwrap_or(0.0);
+            let z = mag.get(cell * 4 + 2).copied().unwrap_or(0.0);
+            (x * x + y * y + z * z).sqrt()
+        }
+        HeatmapField::TeK => te.get(cell).copied().unwrap_or(0.0),
+        HeatmapField::TpK => tp.get(cell).copied().unwrap_or(0.0),
+        HeatmapField::MReduced => mr.get(cell).copied().unwrap_or(0.0),
+    }
+}
+
+fn field_range(
+    field: HeatmapField,
+    mag: &[f32], te: &[f32], tp: &[f32], mr: &[f32],
+    nx: usize, ny: usize, display_layer: usize, t_ambient: f32,
+) -> (f32, f32) {
+    if field.signed() {
+        return (-1.0, 1.0);
+    }
+    match field {
+        HeatmapField::MMag | HeatmapField::MReduced => (0.0, 1.0),
+        HeatmapField::TeK | HeatmapField::TpK => {
+            // Auto-scale per frame, clamped to a sensible floor/ceiling so
+            // the colormap doesn't flicker at equilibrium.
+            let layer_offset = display_layer * nx * ny;
+            let mut mn = f32::INFINITY;
+            let mut mx = f32::NEG_INFINITY;
+            for iy in 0..ny {
+                for ix in 0..nx {
+                    let cell = layer_offset + ix * ny + iy;
+                    let v = field_sample(field, mag, te, tp, mr, cell);
+                    if v < mn { mn = v; }
+                    if v > mx { mx = v; }
+                }
+            }
+            if !mn.is_finite() || !mx.is_finite() {
+                return (t_ambient, t_ambient + 100.0);
+            }
+            let floor = t_ambient.min(mn);
+            let ceil = (t_ambient + 100.0).max(mx);
+            if ceil - floor < 5.0 { (floor, floor + 5.0) } else { (floor, ceil) }
+        }
+        _ => (-1.0, 1.0),
     }
 }
 
@@ -334,113 +506,245 @@ fn push_trim(v: &mut Vec<f32>, val: f32, max: usize) {
     if v.len() > max { v.remove(0); }
 }
 
-// ─── Rendering ─────────────────────────────────────────────────
+// ── Rendering ──────────────────────────────────────────────────────
 
-fn draw_heatmap(buf: &mut [u32], mag: &[f32], nx: usize, ny: usize, stride: usize, display_layer: usize) {
+fn draw_heatmap(
+    buf: &mut [u32], stride: usize, total_h: usize,
+    field: HeatmapField,
+    mag: &[f32], te: &[f32], tp: &[f32], mr: &[f32],
+    nx: usize, ny: usize, display_layer: usize,
+    field_min: f32, field_max: f32,
+) {
     let layer_offset = display_layer * nx * ny;
+    let signed = field.signed();
     for iy in 0..ny {
         for ix in 0..nx {
             let cell = layer_offset + ix * ny + iy;
-            let mz = mag[cell * 4 + 2];
-            buf[iy * stride + ix] = mz_to_rgb(mz);
+            let v = field_sample(field, mag, te, tp, mr, cell);
+            let color = if signed {
+                diverging_rgb(v)
+            } else {
+                sequential_rgb(v, field_min, field_max, matches!(field, HeatmapField::TeK | HeatmapField::TpK))
+            };
+            if iy < total_h && ix < stride {
+                buf[iy * stride + ix] = color;
+            }
         }
     }
-    for y in 0..ny {
-        for x in nx..stride {
-            buf[y * stride + x] = 0x1a1a1a;
+    // Fill gap column between heatmap and status panel with dark gray.
+    let panel_start = nx + 8;
+    if nx < stride {
+        for y in 0..ny.min(total_h) {
+            for x in nx..panel_start.min(stride) {
+                buf[y * stride + x] = 0x0f0f0f;
+            }
         }
     }
 }
 
-fn draw_label_bar(buf: &mut [u32], width: usize, y_offset: usize, height: usize, pulsing: bool) {
+fn draw_label_bar(buf: &mut [u32], stride: usize, total_h: usize, y_offset: usize, height: usize, pulsing: bool) {
     let bg = if pulsing { 0x442200 } else { 0x111111 };
-    for y in y_offset..y_offset + height {
-        for x in 0..width {
-            buf[y * width + x] = bg;
-        }
-    }
-    // Color legend dots
+    text::fill_rect(buf, stride, total_h, 0, y_offset, stride, height, bg);
     let y_mid = y_offset + height / 2;
     let colors = [
-        (0xDD3333, 20),  // red: avg Mz
-        (0x3366DD, 100), // blue: avg Mx
-        (0x33BB55, 180), // green: avg My
-        (0xCC9933, 260), // amber: probe Mz
+        (0xDD3333, "Mz", 20),
+        (0x3366DD, "Mx", 100),
+        (0x33BB55, "My", 180),
+        (0xCC9933, "probe", 260),
     ];
-    for (color, x_start) in colors {
+    for (color, label, x_start) in colors {
         for dx in 0..8 {
             for dy in 0..3 {
                 let x = x_start + dx;
                 let y = y_mid - 1 + dy;
-                if x < width && y < y_offset + height {
-                    buf[y * width + x] = color;
+                if x < stride && y < y_offset + height {
+                    buf[y * stride + x] = color;
                 }
             }
         }
+        text::draw_text(buf, stride, total_h, x_start + 12, y_mid - 3, label, 0xBBBBBB);
     }
 }
 
 fn draw_plot_strip(
-    buf: &mut [u32],
-    width: usize,
-    y_offset: usize,
-    height: usize,
-    mz: &[f32],
-    mx: &[f32],
-    my: &[f32],
-    probe: &[f32],
+    buf: &mut [u32], stride: usize, total_h: usize, y_offset: usize, height: usize,
+    mz: &[f32], mx: &[f32], my: &[f32], probe: &[f32],
 ) {
     let bg = 0x1a1a1a;
-    for y in y_offset..y_offset + height {
-        for x in 0..width {
-            buf[y * width + x] = bg;
-        }
-    }
+    text::fill_rect(buf, stride, total_h, 0, y_offset, stride, height, bg);
 
-    // Zero line (solid)
     let zero_y = y_offset + height / 2;
-    for x in 0..width {
-        buf[zero_y * width + x] = 0x555555;
+    for x in 0..stride {
+        buf[zero_y * stride + x] = 0x555555;
     }
-
-    // ±0.5 gridlines (dotted)
     let q1_y = y_offset + height / 4;
     let q3_y = y_offset + 3 * height / 4;
-    for x in (0..width).step_by(4) {
-        buf[q1_y * width + x] = 0x333333;
-        buf[q3_y * width + x] = 0x333333;
+    for x in (0..stride).step_by(4) {
+        buf[q1_y * stride + x] = 0x333333;
+        buf[q3_y * stride + x] = 0x333333;
     }
-
-    // +1 / -1 border lines (thin dots)
-    for x in (0..width).step_by(8) {
-        buf[y_offset * width + x] = 0x333333;
-        buf[(y_offset + height - 1) * width + x] = 0x333333;
+    for x in (0..stride).step_by(8) {
+        buf[y_offset * stride + x] = 0x333333;
+        buf[(y_offset + height - 1) * stride + x] = 0x333333;
     }
+    text::draw_text(buf, stride, total_h, 4, y_offset + 2, "+1", 0x666666);
+    text::draw_text(buf, stride, total_h, 4, zero_y - 3, "0", 0x666666);
+    text::draw_text(buf, stride, total_h, 4, y_offset + height - 10, "-1", 0x666666);
 
     let plot_line = |buf: &mut [u32], data: &[f32], color: u32, thick: bool| {
         let n = data.len();
-        let x_start = width.saturating_sub(n);
+        let x_start = stride.saturating_sub(n);
         for (i, &val) in data.iter().enumerate() {
             let x = x_start + i;
-            if x >= width { continue; }
+            if x >= stride { continue; }
             let t = ((val + 1.0) * 0.5).clamp(0.0, 1.0);
             let y = y_offset + height - 1 - ((t * (height - 1) as f32) as usize).min(height - 1);
-            buf[y * width + x] = color;
+            buf[y * stride + x] = color;
             if thick {
-                if y > y_offset { buf[(y - 1) * width + x] = color; }
-                if y + 1 < y_offset + height { buf[(y + 1) * width + x] = color; }
+                if y > y_offset { buf[(y - 1) * stride + x] = color; }
+                if y + 1 < y_offset + height { buf[(y + 1) * stride + x] = color; }
             }
         }
     };
-
-    plot_line(buf, mx, 0x3366DD, false);    // blue: avg Mx
-    plot_line(buf, my, 0x33BB55, false);    // green: avg My
-    plot_line(buf, probe, 0xCC9933, false); // amber: probe Mz
-    plot_line(buf, mz, 0xDD3333, true);     // red: avg Mz (thick, on top)
+    plot_line(buf, mx, 0x3366DD, false);
+    plot_line(buf, my, 0x33BB55, false);
+    plot_line(buf, probe, 0xCC9933, false);
+    plot_line(buf, mz, 0xDD3333, true);
 }
 
-fn mz_to_rgb(mz: f32) -> u32 {
-    let t = ((mz + 1.0) * 0.5).clamp(0.0, 1.0);
+// ── Status panel (D1) ──────────────────────────────────────────
+
+fn draw_status_panel(
+    buf: &mut [u32], stride: usize, total_h: usize,
+    x0: usize, y0: usize, w: usize, h: usize,
+    obs: &magnonic_clock_sim::gpu::Observables,
+    field: HeatmapField, field_min: f32, field_max: f32,
+    thermal_on: bool, llb_on: bool,
+    alpha: f32, b_ext_x: f32, b_ext_z: f32,
+    pulse_frames_left: u32, pulse_strength: f32,
+    display_layer: u32, nz: u32,
+    steps_per_frame: usize, steps_per_sec: f64,
+    t_ambient: f32,
+) {
+    if w == 0 { return; }
+    text::fill_rect(buf, stride, total_h, x0, y0, w, h, 0x0f0f0f);
+    // 1-px right border for visual separation from the left edge of the window.
+    for y in y0..(y0 + h).min(total_h) {
+        if x0 < stride { buf[y * stride + x0] = 0x333333; }
+    }
+
+    let label_color: u32 = 0x888888;
+    let value_color: u32 = 0xDDDDDD;
+    let ok_color: u32 = 0x66CC88;
+    let warn_color: u32 = 0xCC8844;
+    let mode_color: u32 = if llb_on { 0x88AACC } else if thermal_on { ok_color } else { 0x666666 };
+
+    let mut y = y0 + 4;
+    let x_label = x0 + 6;
+    let x_val = x0 + 60;
+
+    // Header — integrator mode + thermal state.
+    let integrator = if llb_on { "LLB" } else { "LLG" };
+    let thermal_tag = if !thermal_on {
+        "thermal: off".to_string()
+    } else if llb_on {
+        format!("LLB+M3TM @ {:.0}K", t_ambient)
+    } else {
+        format!("LLG+M3TM @ {:.0}K", t_ambient)
+    };
+    text::draw_text(buf, stride, total_h, x_label, y, "[", 0x666666);
+    text::draw_text(buf, stride, total_h, x_label + 6, y, integrator, mode_color);
+    text::draw_text(buf, stride, total_h, x_label + 6 + integrator.len() * text::CELL_W, y, "]", 0x666666);
+    text::draw_text(buf, stride, total_h, x_label + 6 + (integrator.len() + 2) * text::CELL_W, y, &thermal_tag, label_color);
+    y += text::CELL_H + 2;
+
+    // Separator line
+    for dx in 0..w.saturating_sub(12) {
+        if x_label + dx < stride && y < total_h { buf[y * stride + x_label + dx] = 0x222222; }
+    }
+    y += 3;
+
+    // Time + throughput
+    text::draw_text(buf, stride, total_h, x_label, y, "t", label_color);
+    text::draw_text(buf, stride, total_h, x_val, y, &format!("{:.2} ps", obs.time_ps), value_color);
+    y += text::CELL_H;
+    text::draw_text(buf, stride, total_h, x_label, y, "step", label_color);
+    text::draw_text(buf, stride, total_h, x_val, y, &format!("{}", obs.step), value_color);
+    y += text::CELL_H;
+    text::draw_text(buf, stride, total_h, x_label, y, "rate", label_color);
+    text::draw_text(buf, stride, total_h, x_val, y, &format!("{:.0}/s  {}/fr", steps_per_sec, steps_per_frame), value_color);
+    y += text::CELL_H + 3;
+
+    // Current field
+    text::draw_text(buf, stride, total_h, x_label, y, "view", label_color);
+    let field_desc = match field.units() {
+        "" => format!("{}", field.label()),
+        u => format!("{} [{}]", field.label(), u),
+    };
+    text::draw_text(buf, stride, total_h, x_val, y, &field_desc, 0xFFEE99);
+    y += text::CELL_H;
+    text::draw_text(buf, stride, total_h, x_label, y, "range", label_color);
+    text::draw_text(buf, stride, total_h, x_val, y, &format!("{:.3} .. {:.3}", field_min, field_max), value_color);
+    y += text::CELL_H + 3;
+
+    // Magnetization summary
+    text::draw_text(buf, stride, total_h, x_label, y, "avg Mz", label_color);
+    text::draw_text(buf, stride, total_h, x_val, y, &format!("{:+.4}", obs.avg_mz), value_color);
+    y += text::CELL_H;
+    text::draw_text(buf, stride, total_h, x_label, y, "|m|", label_color);
+    text::draw_text(buf, stride, total_h, x_val, y, &format!("{:.4}..{:.4}", obs.min_norm, obs.max_norm), value_color);
+    y += text::CELL_H;
+    text::draw_text(buf, stride, total_h, x_label, y, "probe", label_color);
+    text::draw_text(buf, stride, total_h, x_val, y, &format!("{:+.4}", obs.probe_mz), value_color);
+    y += text::CELL_H + 3;
+
+    // Thermal readouts
+    if thermal_on {
+        text::draw_text(buf, stride, total_h, x_label, y, "Te max", label_color);
+        text::draw_text(buf, stride, total_h, x_val, y, &format!("{:.0} K", obs.max_t_e), value_color);
+        y += text::CELL_H;
+        text::draw_text(buf, stride, total_h, x_label, y, "Tp max", label_color);
+        text::draw_text(buf, stride, total_h, x_val, y, &format!("{:.0} K", obs.max_t_p), value_color);
+        y += text::CELL_H;
+        text::draw_text(buf, stride, total_h, x_label, y, "|m|red", label_color);
+        text::draw_text(buf, stride, total_h, x_val, y, &format!("{:.4}", obs.min_m_reduced), value_color);
+        y += text::CELL_H + 3;
+    }
+
+    // Controls
+    text::draw_text(buf, stride, total_h, x_label, y, "a", label_color);
+    text::draw_text(buf, stride, total_h, x_val, y, &format!("{:.5}", alpha), value_color);
+    y += text::CELL_H;
+    text::draw_text(buf, stride, total_h, x_label, y, "Bz", label_color);
+    text::draw_text(buf, stride, total_h, x_val, y, &format!("{:+.2} T", b_ext_z), value_color);
+    y += text::CELL_H;
+    if b_ext_x.abs() > 1e-6 || pulse_frames_left > 0 {
+        text::draw_text(buf, stride, total_h, x_label, y, "Bx", label_color);
+        text::draw_text(buf, stride, total_h, x_val, y, &format!("{:+.2} T [{}]", b_ext_x, pulse_frames_left), warn_color);
+        y += text::CELL_H;
+    }
+    text::draw_text(buf, stride, total_h, x_label, y, "pulse", label_color);
+    text::draw_text(buf, stride, total_h, x_val, y, &format!("{:.1} T (P to fire)", pulse_strength), value_color);
+    y += text::CELL_H + 3;
+
+    // Stack
+    if nz > 1 {
+        text::draw_text(buf, stride, total_h, x_label, y, "layer", label_color);
+        text::draw_text(buf, stride, total_h, x_val, y, &format!("{} / {}", display_layer, nz), value_color);
+    }
+
+    // Footer — abbreviated controls.
+    let footer_y = y0 + h.saturating_sub(3 * text::CELL_H + 4);
+    text::draw_text(buf, stride, total_h, x_label, footer_y, "V:view  P:pulse", 0x666666);
+    text::draw_text(buf, stride, total_h, x_label, footer_y + text::CELL_H, "SPACE:play  C:clear", 0x666666);
+    text::draw_text(buf, stride, total_h, x_label, footer_y + 2 * text::CELL_H, "R/D/U/S/K reset", 0x666666);
+}
+
+// ── Colormaps ──────────────────────────────────────────────────────
+
+/// Diverging blue-white-red map for signed [-1, +1] data (Mz/Mx/My).
+fn diverging_rgb(v: f32) -> u32 {
+    let t = ((v + 1.0) * 0.5).clamp(0.0, 1.0);
     let (r, g, b) = if t < 0.5 {
         let s = t * 2.0;
         ((s * 255.0) as u32, (s * 255.0) as u32, 255u32)
@@ -449,4 +753,77 @@ fn mz_to_rgb(mz: f32) -> u32 {
         (255u32, ((1.0 - s) * 255.0) as u32, ((1.0 - s) * 255.0) as u32)
     };
     (r << 16) | (g << 8) | b
+}
+
+/// Sequential colormap. `hot` = true uses a black→red→yellow→white ramp for
+/// temperatures; false uses a viridis-like blue→green→yellow ramp for
+/// magnitude-style data.
+fn sequential_rgb(v: f32, vmin: f32, vmax: f32, hot: bool) -> u32 {
+    let range = (vmax - vmin).max(1e-6);
+    let t = ((v - vmin) / range).clamp(0.0, 1.0);
+    if hot {
+        // 0..0.33 black→red, 0.33..0.66 red→yellow, 0.66..1.0 yellow→white
+        let (r, g, b) = if t < 1.0 / 3.0 {
+            let s = t * 3.0;
+            ((s * 255.0) as u32, 0u32, 0u32)
+        } else if t < 2.0 / 3.0 {
+            let s = (t - 1.0 / 3.0) * 3.0;
+            (255u32, (s * 255.0) as u32, 0u32)
+        } else {
+            let s = (t - 2.0 / 3.0) * 3.0;
+            (255u32, 255u32, (s * 255.0) as u32)
+        };
+        (r << 16) | (g << 8) | b
+    } else {
+        // Cheap viridis-ish: blue→teal→green→yellow
+        let r = ((1.0 - (2.0 * t - 1.0).abs()).max(0.0) * 200.0 + t * 55.0) as u32;
+        let g = (t.clamp(0.0, 1.0) * 255.0) as u32;
+        let b = ((1.0 - t) * 200.0) as u32;
+        (r.min(255) << 16) | (g.min(255) << 8) | b.min(255)
+    }
+}
+
+// ── Help ───────────────────────────────────────────────────────
+
+fn print_controls() {
+    eprintln!("╔══════════════════════════════════════════╗");
+    eprintln!("║  Controls:                               ║");
+    eprintln!("║  Space     Play / Pause                  ║");
+    eprintln!("║  V         Cycle heatmap field           ║");
+    eprintln!("║  P         Fire transverse Bx pulse      ║");
+    eprintln!("║  Left/Right  Pulse strength ±0.5 T       ║");
+    eprintln!("║  A / Z     Increase / decrease alpha     ║");
+    eprintln!("║  B / N     Increase / decrease Bz ±0.1 T ║");
+    eprintln!("║  Up / Down Steps per frame ×2 / ÷2       ║");
+    eprintln!("║  R         Reset: random magnetization   ║");
+    eprintln!("║  D         Reset: stripe domains         ║");
+    eprintln!("║  U         Reset: uniform +z             ║");
+    eprintln!("║  S         Reset: Néel skyrmion seed     ║");
+    eprintln!("║  K         Reset: alternating ±z (syn-AFM)║");
+    eprintln!("║  1/2/3/4   Cycle displayed layer (Nz>1)  ║");
+    eprintln!("║  C         Clear plot history            ║");
+    eprintln!("║  Escape    Quit                          ║");
+    eprintln!("╚══════════════════════════════════════════╝");
+}
+
+fn print_help() {
+    eprintln!("magnonic-dashboard — interactive simulator");
+    eprintln!();
+    eprintln!("Stack / geometry:");
+    eprintln!("  --material NAME / --substrate NAME / --thickness NM");
+    eprintln!("  --stack \"MAT1:T_nm,MAT2:T_nm,...\" --interlayer-a F,F,... --layer-spacing NM,NM,...");
+    eprintln!("  --nx N  --ny N");
+    eprintln!();
+    eprintln!("Dynamics:");
+    eprintln!("  --alpha F / --bz T / --dt S");
+    eprintln!();
+    eprintln!("Thermal / LLB (Phase P3+):");
+    eprintln!("  --enable-thermal           attach a ThermalConfig (M3TM observables populated)");
+    eprintln!("  --enable-llb               engage LLB integrator (implies --enable-thermal)");
+    eprintln!("  --thermal-preset KEY       ni | py | fgt | fgt-zhou | yig | cofeb (default fgt)");
+    eprintln!("  --t-ambient K              ambient bath temperature (default 300)");
+    eprintln!();
+    eprintln!("Example: YIG/FGT bilayer dashboard with thermal dynamics:");
+    eprintln!("  magnonic-dashboard --stack yig:2,fgt-bulk:0.7 --interlayer-a 4e-13 \\");
+    eprintln!("                     --enable-llb --thermal-preset fgt-zhou --t-ambient 150");
 }

@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 description = "Rust/WebGPU LLG solver for magnonic time crystal simulation"
 publish = false
+# Disable Cargo's auto-discovery of bins/examples — the dashboard uses a
+# helper module (`src/bin/dashboard_text.rs`) loaded via `#[path]`, which
+# Cargo would otherwise try to build as its own `main`-less bin.
+autobins = false
+autoexamples = false
 
 [lib]
 name = "magnonic_clock_sim"
@@ -21,6 +26,46 @@ required-features = ["gui"]
 [[bin]]
 name = "magnonic-sweep"
 path = "src/bin/sweep.rs"
+
+[[example]]
+name = "test_beaurepaire_ni"
+path = "examples/test_beaurepaire_ni.rs"
+
+[[example]]
+name = "test_llb_ni_demag"
+path = "examples/test_llb_ni_demag.rs"
+
+[[example]]
+name = "test_llb_reduces_to_llg"
+path = "examples/test_llb_reduces_to_llg.rs"
+
+[[example]]
+name = "test_m2_coupling"
+path = "examples/test_m2_coupling.rs"
+
+[[example]]
+name = "test_m3tm_gpu_vs_host"
+path = "examples/test_m3tm_gpu_vs_host.rs"
+
+[[example]]
+name = "test_nz2"
+path = "examples/test_nz2.rs"
+
+[[example]]
+name = "test_pump_probe"
+path = "examples/test_pump_probe.rs"
+
+[[example]]
+name = "test_sp4_proxy"
+path = "examples/test_sp4_proxy.rs"
+
+[[example]]
+name = "test_zhou_fgt"
+path = "examples/test_zhou_fgt.rs"
+
+[[example]]
+name = "test_zhou_fgt_calibrate"
+path = "examples/test_zhou_fgt_calibrate.rs"
 
 [features]
 default = []
