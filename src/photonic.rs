@@ -124,10 +124,13 @@ impl Default for ThermalConfig {
 /// M3TM: Koopmans 2010 (Nat. Mater. 9, 259). R is precomputed on the host
 /// from the microscopic parameters here via `r_koopmans_prefactor()`.
 ///
-/// LLB tables: `m_e_table[i]` and `chi_par_table[i]` sample equilibrium
-/// reduced magnetization and longitudinal susceptibility on a uniform grid
-/// `T_i = i · (1.5·t_c) / (llb_table_n − 1)` for `i = 0 .. llb_table_n − 1`.
-/// Built offline from a Brillouin / MFA model (see `material_thermal.rs`).
+/// LLB tables (Phase F1, 2D extension): `m_e_table` and `chi_par_table` are
+/// stored as flat row-major `[i_T][i_B]` arrays. `i_T = 0..llb_table_n − 1`
+/// indexes the temperature axis on a uniform grid `T ∈ [0, 1.5·t_c]`;
+/// `i_B = 0..llb_table_n_b − 1` indexes the longitudinal-field axis on a
+/// uniform grid `B ∈ [0, b_max]`. The B = 0 column reproduces the previous
+/// 1D table exactly. Built offline from a finite-field Brillouin / MFA
+/// solver (see `material_thermal::brillouin_tables_spin_half_2d`).
 #[derive(Clone, Debug)]
 pub struct LayerThermalParams {
     // ─── M3TM microscopic parameters ────────────────────────────────
@@ -159,11 +162,17 @@ pub struct LayerThermalParams {
     pub t_c: f64,
     /// Low-temperature Gilbert damping α₀ (matches LLG α when thermal off).
     pub alpha_0: f64,
-    /// Number of rows in `m_e_table` / `chi_par_table`.
+    /// Number of rows on the temperature axis.
     pub llb_table_n: usize,
-    /// m_e(T_i) on uniform grid T_i ∈ [0, 1.5·t_c].
+    /// Number of columns on the longitudinal-field axis (Phase F1).
+    /// The B-axis spans `[0, b_max_t]`. Default 32.
+    pub llb_table_n_b: usize,
+    /// Upper bound of the B-axis [Tesla] (Phase F1). Default 10 T — covers
+    /// the saturation regime for typical ferromagnets.
+    pub b_max_t: f64,
+    /// m_e(T_i, B_j) flat row-major [i_T * n_b + i_B], dimensionless.
     pub m_e_table: Vec<f32>,
-    /// χ_∥(T_i) on uniform grid T_i ∈ [0, 1.5·t_c] [dimensionless; μ_B / (k_B·T_c)-normalized].
+    /// χ_∥(T_i, B_j) flat row-major same layout. [dimensionless; μ_B / (k_B·T_c)-normalized].
     pub chi_par_table: Vec<f32>,
     /// LLB longitudinal-relaxation time constant [s]. Effective τ_∥ at temperature T
     /// is `tau_long_base / α_∥(T)`, where `α_∥(T) = α_0 · 2T/(3 · T_c)`.
@@ -191,33 +200,66 @@ impl LayerThermalParams {
             / (self.mu_atom_bohr * e_d.powi(2))
     }
 
-    /// Lookup m_e(T) from the table (linear interp, clamped at endpoints).
-    /// Grid: `T_i = i · (1.5·t_c) / (n − 1)`.
+    /// Lookup m_e(T) at zero applied field. Convenience for legacy call
+    /// sites and tests; equivalent to `sample_m_e_2d(t, 0.0)`.
     pub fn sample_m_e(&self, t: f64) -> f64 {
-        self.sample_table(&self.m_e_table, t)
+        self.sample_m_e_2d(t, 0.0)
     }
 
+    /// Lookup χ_∥(T) at zero applied field.
     pub fn sample_chi_par(&self, t: f64) -> f64 {
-        self.sample_table(&self.chi_par_table, t)
+        self.sample_chi_par_2d(t, 0.0)
     }
 
-    fn sample_table(&self, table: &[f32], t: f64) -> f64 {
-        let n = table.len();
-        if n == 0 {
+    /// Bilinear lookup of `m_e(T, B)` from the 2D table. `b` is in Tesla.
+    /// Out-of-range arguments are clamped to nearest edge.
+    pub fn sample_m_e_2d(&self, t: f64, b: f64) -> f64 {
+        self.sample_table_2d(&self.m_e_table, t, b)
+    }
+
+    /// Bilinear lookup of `χ_∥(T, B)`.
+    pub fn sample_chi_par_2d(&self, t: f64, b: f64) -> f64 {
+        self.sample_table_2d(&self.chi_par_table, t, b)
+    }
+
+    fn sample_table_2d(&self, table: &[f32], t: f64, b: f64) -> f64 {
+        let n_t = self.llb_table_n;
+        let n_b = self.llb_table_n_b.max(1);
+        if table.is_empty() || n_t == 0 {
             return 0.0;
         }
         let t_max = 1.5 * self.t_c;
-        if t <= 0.0 {
-            return table[0] as f64;
-        }
-        if t >= t_max {
-            return table[n - 1] as f64;
-        }
-        let u = t / t_max * (n - 1) as f64;
-        let i0 = u.floor() as usize;
-        let i1 = (i0 + 1).min(n - 1);
-        let frac = u - i0 as f64;
-        (table[i0] as f64) * (1.0 - frac) + (table[i1] as f64) * frac
+        let b_max = self.b_max_t.max(1e-12);
+        // T axis fractional index.
+        let ut = if t <= 0.0 {
+            0.0
+        } else if t >= t_max {
+            (n_t - 1) as f64
+        } else {
+            t / t_max * (n_t - 1) as f64
+        };
+        // B axis fractional index.
+        let ub = if b <= 0.0 {
+            0.0
+        } else if b >= b_max {
+            (n_b - 1) as f64
+        } else {
+            b.abs() / b_max * (n_b - 1) as f64
+        };
+        let it0 = ut.floor() as usize;
+        let it1 = (it0 + 1).min(n_t - 1);
+        let ib0 = ub.floor() as usize;
+        let ib1 = (ib0 + 1).min(n_b - 1);
+        let ft = ut - it0 as f64;
+        let fb = ub - ib0 as f64;
+        let v00 = table[it0 * n_b + ib0] as f64;
+        let v01 = table[it0 * n_b + ib1] as f64;
+        let v10 = table[it1 * n_b + ib0] as f64;
+        let v11 = table[it1 * n_b + ib1] as f64;
+        // Bilinear: first interp on B at each T row, then on T.
+        let v0 = v00 * (1.0 - fb) + v01 * fb;
+        let v1 = v10 * (1.0 - fb) + v11 * fb;
+        v0 * (1.0 - ft) + v1 * ft
     }
 }
 

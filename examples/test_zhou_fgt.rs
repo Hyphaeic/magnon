@@ -52,7 +52,9 @@ fn run_trial(
     let mut preset = material_thermal::fgt_ni_surrogate();
     preset.t_c = t_c_override;
     preset.g_sub_phonon = g_sub_phonon;
-    let (m_e, chi) = material_thermal::brillouin_tables_spin_half(preset.t_c, preset.llb_table_n);
+    let (m_e, chi) = material_thermal::brillouin_tables_spin_half_2d(
+        preset.t_c, preset.llb_table_n, preset.llb_table_n_b, preset.b_max_t,
+    );
     preset.m_e_table = m_e;
     preset.chi_par_table = chi;
 
@@ -90,7 +92,9 @@ fn run_trial(
     // the LLB drive that pulls |m| → m_e(T_s), so the "pre-pulse" state is
     // already in equilibrium (no relaxation transient confounds the demag
     // measurement).
-    let m_eq = preset.sample_m_e(t_ambient_k as f64);
+    // F1: m_e is now field-dependent. At T = T_c with B = 1 T, this picks up
+    // the field-induced equilibrium that was previously zero.
+    let m_eq = preset.sample_m_e_2d(t_ambient_k as f64, 1.0);
     // reset_uniform_z gives |m|=1 with a 5° cone. We rescale by m_eq.
     // (Not worth adding a setter — just do the simulation long enough and
     // the LLB relaxes to m_eq within a few τ_∥.)
@@ -133,7 +137,7 @@ fn run_trial(
             "Trial: T_amb={:.0}K  F={:.3} mJ/cm²  R={:.2}  g_sub={:.1e}  T_c={:.0}K",
             t_ambient_k, fluence_mj_cm2, reflectivity, g_sub_phonon, t_c_override
         );
-        println!("  m_e({}K) = {:.3}  (equilibrium)", t_ambient_k, m_eq);
+        println!("  m_e({}K, B=1T) = {:.3}  (equilibrium)", t_ambient_k, m_eq);
         for t_target in [0.5_f64, 1.5, 2.0, 2.2, 3.0, 5.0, 10.0, 22.0, 40.0] {
             let i = traj_ps.iter().position(|&t| t > t_target).unwrap_or(traj_ps.len() - 1);
             println!(
@@ -161,9 +165,11 @@ fn main() {
     println!("=== Zhou 2025 FGT feasibility probe — operating-point scan ===\n");
     println!("Target: 79 % demag @ 22.2 ps from a |m|_initial set by (T, B=1T) equilibrium.\n");
 
-    // 1. Current preset at Zhou's T_c=210K with 1 T field (tables have no
-    //    field — m_e(T_c)=0, so this is a degenerate baseline).
-    println!("[1] Zhou conditions literal — T = T_c = 210 K (degenerate baseline):");
+    // 1. Zhou's literal conditions: T = T_c = 210 K under 1 T applied field.
+    //    Pre-F1 this was degenerate (zero-field tables → m_e(T_c)=0). After
+    //    F1 the 2D table samples m_e(Tc, 1T) > 0 and the operating point is
+    //    well-defined.
+    println!("[1] Zhou conditions literal — T = T_c = 210 K, B = 1 T (now well-defined under F1):");
     run_trial(210.0, 0.24, 0.5, 2.0e16, 210.0, true);
     println!();
 

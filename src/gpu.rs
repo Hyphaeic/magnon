@@ -4,11 +4,14 @@ use wgpu::util::DeviceExt;
 
 use crate::config::{SimConfig, Stack};
 
-/// Pack per-layer LLB tables into flat `MAX_LAYERS × LLB_TABLE_N` buffers.
-/// Missing or disabled layers receive m_e = 1.0, χ_∥ = 0.0 — i.e. "frozen
-/// at T = 0", a safe identity when the M3TM kernel is not dispatched.
+/// Pack per-layer 2D LLB tables (Phase F1) into flat
+/// `MAX_LAYERS × LLB_TABLE_N × LLB_TABLE_N_B` buffers.
+/// Layout per layer: row-major `[i_T * n_b + i_B]`, padded with the
+/// "frozen-at-T=0" identity (m_e = 1, χ_∥ = 0) for unused (T, B) bins or
+/// when thermal is disabled.
 fn pack_llb_tables(cfg: &SimConfig) -> (Vec<f32>, Vec<f32>) {
-    let total = MAX_LAYERS * LLB_TABLE_N;
+    let per_layer = LLB_TABLE_N * LLB_TABLE_N_B;
+    let total = MAX_LAYERS * per_layer;
     let mut m_e = vec![1.0f32; total];
     let mut chi = vec![0.0f32; total];
     let thermal = match &cfg.photonic.thermal {
@@ -16,11 +19,16 @@ fn pack_llb_tables(cfg: &SimConfig) -> (Vec<f32>, Vec<f32>) {
         None => return (m_e, chi),
     };
     for (iz, p) in thermal.per_layer.iter().take(MAX_LAYERS).enumerate() {
-        let n = p.llb_table_n.min(LLB_TABLE_N);
-        let base = iz * LLB_TABLE_N;
-        for i in 0..n {
-            m_e[base + i] = p.m_e_table.get(i).copied().unwrap_or(0.0);
-            chi[base + i] = p.chi_par_table.get(i).copied().unwrap_or(0.0);
+        let layer_base = iz * per_layer;
+        let nt = p.llb_table_n.min(LLB_TABLE_N);
+        let nb = p.llb_table_n_b.min(LLB_TABLE_N_B).max(1);
+        for it in 0..nt {
+            for ib in 0..nb {
+                let dst = layer_base + it * LLB_TABLE_N_B + ib;
+                let src = it * p.llb_table_n_b + ib;
+                m_e[dst] = p.m_e_table.get(src).copied().unwrap_or(0.0);
+                chi[dst] = p.chi_par_table.get(src).copied().unwrap_or(0.0);
+            }
         }
     }
     (m_e, chi)
@@ -37,9 +45,11 @@ fn pack_llb_tables(cfg: &SimConfig) -> (Vec<f32>, Vec<f32>) {
 
 const MAX_LAYERS: usize = Stack::MAX_LAYERS;
 
-/// Rows in the LLB (m_e, χ_∥) lookup tables. Uniform T grid on [0, 1.5·T_c].
-/// Matches the default in `material_thermal::brillouin_tables_spin_half`.
+/// Rows on the temperature axis of the LLB tables (T ∈ [0, 1.5·T_c]).
 pub const LLB_TABLE_N: usize = 256;
+/// Cols on the longitudinal-field axis of the 2D LLB tables (Phase F1).
+/// B ∈ [0, b_max_t] (per-layer; default 10 T).
+pub const LLB_TABLE_N_B: usize = 32;
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -149,10 +159,15 @@ struct GpuParams {
     //   t_ambient is shared across layers (bath reference for substrate
     //   sink); other slots reserved for future globals.
     thermal_globals: [f32; 4],
+    // 688-703: per-layer B-axis upper bound for the 2D LLB tables [Tesla]
+    // (Phase F1). Used by the shader to map a physical |B| to the table's
+    // column index. Zero or negative ⇒ the layer's table is treated as
+    // 1D-only (B = 0 column repeated).
+    layer_thermal_b_max: [f32; 4],
 }
 
 const OFFSET_PULSE_AMPLITUDES: u64 = 400;
-const OFFSET_GPUPARAMS_END: u64 = 688;
+const OFFSET_GPUPARAMS_END: u64 = 704;
 const _: () = assert!(OFFSET_GPUPARAMS_END as usize == std::mem::size_of::<GpuParams>());
 
 impl GpuParams {
@@ -290,6 +305,7 @@ impl GpuParams {
                     .unwrap_or(300.0);
                 [t_amb, 0.0, 0.0, 0.0]
             },
+            layer_thermal_b_max: Self::thermal_vec4(cfg, |p| p.b_max_t as f32),
         }
     }
 

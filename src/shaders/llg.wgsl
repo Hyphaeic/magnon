@@ -74,6 +74,7 @@ struct Params {
     layer_thermal_tau_long: vec4<f32>,  // seconds (P3b longitudinal relaxation base)
     layer_thermal_g_sub_p: vec4<f32>,   // W/(m³·K) — phonon → substrate sink
     thermal_globals: vec4<f32>,         // (t_ambient, pad, pad, pad)
+    layer_thermal_b_max: vec4<f32>,     // Tesla — F1 B-axis ceiling per layer
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -92,6 +93,8 @@ struct Params {
 @group(0) @binding(10) var<storage, read> chi_par_table: array<f32>;
 
 const LLB_TABLE_N: u32 = 256u;
+// F1: 2D table column count along the B (longitudinal field) axis.
+const LLB_TABLE_N_B: u32 = 32u;
 
 // ─── Index helpers ─────────────────────────────────────────────
 
@@ -479,17 +482,38 @@ fn m3tm_derivs(s: M3tmState, p_laser: f32, iz: u32) -> vec3<f32> {
 // captures ultrafast demag at high T. See ADR-003 / plan-photonic.md
 // Implementation notes for P3b for the rationale vs. full Atxitia form.
 
-fn sample_m_e(iz: u32, t: f32) -> f32 {
+// Bilinear (T, B) lookup of m_e from the 2D LLB table.
+//
+// Layout per layer: row-major [i_T * LLB_TABLE_N_B + i_B], consumed from
+// `m_e_table` at offset `iz * LLB_TABLE_N * LLB_TABLE_N_B`.
+//
+// `b` is the magnitude of the longitudinal applied field at this cell,
+// in Tesla. Currently we feed it `|params.b_ext.z|` — the external Zeeman
+// field along the easy axis (PMA convention z).
+fn sample_m_e(iz: u32, t: f32, b: f32) -> f32 {
     let t_c = params.layer_thermal_t_c[iz];
     if t_c < 1.0 { return 1.0; }
     let t_max = 1.5 * t_c;
-    let n_f = f32(LLB_TABLE_N);
-    let u = clamp(t / t_max, 0.0, 0.999999) * (n_f - 1.0);
-    let i0 = u32(floor(u));
-    let i1 = min(i0 + 1u, LLB_TABLE_N - 1u);
-    let frac = u - f32(i0);
-    let base = iz * LLB_TABLE_N;
-    return m_e_table[base + i0] * (1.0 - frac) + m_e_table[base + i1] * frac;
+    let n_t_f = f32(LLB_TABLE_N);
+    let n_b_f = f32(LLB_TABLE_N_B);
+    let ut = clamp(t / t_max, 0.0, 0.999999) * (n_t_f - 1.0);
+    // B-axis index. If b_max ≤ 0 the layer table is 1D-only; pin to col 0.
+    let b_max = max(params.layer_thermal_b_max[iz], 1e-12);
+    let ub = clamp(abs(b) / b_max, 0.0, 0.999999) * (n_b_f - 1.0);
+    let it0 = u32(floor(ut));
+    let it1 = min(it0 + 1u, LLB_TABLE_N - 1u);
+    let ib0 = u32(floor(ub));
+    let ib1 = min(ib0 + 1u, LLB_TABLE_N_B - 1u);
+    let ft = ut - f32(it0);
+    let fb = ub - f32(ib0);
+    let layer_base = iz * LLB_TABLE_N * LLB_TABLE_N_B;
+    let v00 = m_e_table[layer_base + it0 * LLB_TABLE_N_B + ib0];
+    let v01 = m_e_table[layer_base + it0 * LLB_TABLE_N_B + ib1];
+    let v10 = m_e_table[layer_base + it1 * LLB_TABLE_N_B + ib0];
+    let v11 = m_e_table[layer_base + it1 * LLB_TABLE_N_B + ib1];
+    let v0 = v00 * (1.0 - fb) + v01 * fb;
+    let v1 = v10 * (1.0 - fb) + v11 * fb;
+    return v0 * (1.0 - ft) + v1 * ft;
 }
 
 fn alpha_perp(iz: u32, t_s: f32) -> f32 {
@@ -522,7 +546,11 @@ fn llb_torque(m: vec3<f32>, b_eff: vec3<f32>, iz: u32, t_s: f32) -> vec3<f32> {
     let tau_base = params.layer_thermal_tau_long[iz];
     if tau_base > 0.0 && a_par > 1e-9 {
         let rate = a_par / tau_base;         // 1/s
-        let m_eq = sample_m_e(iz, t_s);
+        // F1: equilibrium m_e is now field-dependent. Use the longitudinal
+        // (z-axis) component of the external Zeeman field to resolve T_c
+        // degeneracy under e.g. Zhou's 1 T perpendicular-pumping protocol.
+        let b_long = abs(params.b_ext.z);
+        let m_eq = sample_m_e(iz, t_s, b_long);
         dmdt = dmdt + rate * (m_eq - m_mag) * m_hat;
     }
 

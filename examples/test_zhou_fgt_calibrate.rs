@@ -97,7 +97,9 @@ fn run_trial(tau_long: f64, r: f32, g_sub: f64) -> TrialMetrics {
     preset.tau_long_base = tau_long;
     preset.g_sub_phonon = g_sub;
     let (m_e_table, chi_table) =
-        material_thermal::brillouin_tables_spin_half(preset.t_c, preset.llb_table_n);
+        material_thermal::brillouin_tables_spin_half_2d(
+            preset.t_c, preset.llb_table_n, preset.llb_table_n_b, preset.b_max_t,
+        );
     preset.m_e_table = m_e_table;
     preset.chi_par_table = chi_table;
 
