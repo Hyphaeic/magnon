@@ -75,6 +75,7 @@ struct Params {
     layer_thermal_g_sub_p: vec4<f32>,   // W/(m³·K) — phonon → substrate sink
     thermal_globals: vec4<f32>,         // (t_ambient, pad, pad, pad)
     layer_thermal_b_max: vec4<f32>,     // Tesla — F1 B-axis ceiling per layer
+    layer_thermal_tau_fast: vec4<f32>,  // F2 fast-stage relaxation base time [s]
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -91,6 +92,9 @@ struct Params {
 @group(0) @binding(8) var<storage, read_write> m_reduced: array<f32>;
 @group(0) @binding(9) var<storage, read> m_e_table: array<f32>;
 @group(0) @binding(10) var<storage, read> chi_par_table: array<f32>;
+// F2: per-cell proxy magnetization that lags m_e(T_s, B) on tau_fast and is
+// the target the LLB longitudinal torque drives |m| toward on tau_slow.
+@group(0) @binding(11) var<storage, read_write> m_target: array<f32>;
 
 const LLB_TABLE_N: u32 = 256u;
 // F1: 2D table column count along the B (longitudinal field) axis.
@@ -530,7 +534,12 @@ fn alpha_par(iz: u32, t_s: f32) -> f32 {
 
 /// LLB torque in "Euler form": returns dm/dt [1/s] for a vector m that is
 /// NOT constrained to |m|=1. Used by llb_predict / llb_correct.
-fn llb_torque(m: vec3<f32>, b_eff: vec3<f32>, iz: u32, t_s: f32) -> vec3<f32> {
+///
+/// F2: longitudinal target is `m_target[idx]` (the F2 proxy variable),
+/// not `m_e(T_s, B)` directly. The proxy itself relaxes toward `m_e` on
+/// `tau_fast` inside `advance_m3tm`. When `tau_fast ≤ 0` the proxy is
+/// pinned to `m_e` each step, recovering the F1 single-stage path.
+fn llb_torque(idx: u32, m: vec3<f32>, b_eff: vec3<f32>, iz: u32, t_s: f32) -> vec3<f32> {
     let m_mag = max(length(m), 1e-6);
     let m_hat = m / m_mag;
 
@@ -546,11 +555,10 @@ fn llb_torque(m: vec3<f32>, b_eff: vec3<f32>, iz: u32, t_s: f32) -> vec3<f32> {
     let tau_base = params.layer_thermal_tau_long[iz];
     if tau_base > 0.0 && a_par > 1e-9 {
         let rate = a_par / tau_base;         // 1/s
-        // F1: equilibrium m_e is now field-dependent. Use the longitudinal
-        // (z-axis) component of the external Zeeman field to resolve T_c
-        // degeneracy under e.g. Zhou's 1 T perpendicular-pumping protocol.
-        let b_long = abs(params.b_ext.z);
-        let m_eq = sample_m_e(iz, t_s, b_long);
+        // F2: drive |m| toward the proxy `m_target`, not directly toward
+        // m_e(T_s, B). The proxy lags m_e by τ_fast, producing the τ_1
+        // (fast) component of Zhou's two-stage decay; LLB on τ_slow gives τ_2.
+        let m_eq = m_target[idx];
         dmdt = dmdt + rate * (m_eq - m_mag) * m_hat;
     }
 
@@ -577,7 +585,7 @@ fn field_torque_phase0_llb(@builtin(global_invocation_id) gid: vec3<u32>) {
               + anisotropy_field(m, iz) + zeeman_field() + laser_field_at(idx)
               + exchange_bias_field(iz) + dmi_from_mag(idx);
     let t_s = temp_e[idx];
-    let t = llb_torque(m, b_eff, iz, t_s);
+    let t = llb_torque(idx, m, b_eff, iz, t_s);
     let base = idx * 4u;
     h_eff[base] = b_eff.x; h_eff[base + 1u] = b_eff.y; h_eff[base + 2u] = b_eff.z;
     torque_0[base] = t.x; torque_0[base + 1u] = t.y; torque_0[base + 2u] = t.z;
@@ -593,7 +601,7 @@ fn field_torque_phase1_llb(@builtin(global_invocation_id) gid: vec3<u32>) {
               + anisotropy_field(m, iz) + zeeman_field() + laser_field_at(idx)
               + exchange_bias_field(iz) + dmi_from_pred(idx);
     let t_s = temp_e[idx];
-    let t = llb_torque(m, b_eff, iz, t_s);
+    let t = llb_torque(idx, m, b_eff, iz, t_s);
     let base = idx * 4u;
     h_eff[base] = b_eff.x; h_eff[base + 1u] = b_eff.y; h_eff[base + 2u] = b_eff.z;
     torque_1[base] = t.x; torque_1[base + 1u] = t.y; torque_1[base + 2u] = t.z;
@@ -675,4 +683,28 @@ fn advance_m3tm(@builtin(global_invocation_id) gid: vec3<u32>) {
     // With LLB active, mirror m_reduced to |mag| for observability; LLB
     // owns the source of truth. Otherwise M3TM writes its integrated |m|.
     m_reduced[idx] = select(new_m, mag_mag, params.enable_llb_flag != 0u);
+
+    // ─── F2: evolve m_target toward m_e(T_s, B) ──────────────────
+    // Use the post-step T_e (= proxy for T_s) to evaluate m_e on the
+    // 2D table. Field is the longitudinal external Zeeman.
+    let t_s_new = new_te;
+    let b_long = abs(params.b_ext.z);
+    let m_e_now = sample_m_e(iz, t_s_new, b_long);
+    let tau_fast = params.layer_thermal_tau_fast[iz];
+    let a_par_now = alpha_par(iz, t_s_new);
+    var new_m_target: f32;
+    if tau_fast > 0.0 && a_par_now > 1e-9 {
+        // Implicit-Euler step on a stiff first-order linear ODE:
+        //   dm_t/dt = (m_e − m_t) · a_par / tau_fast
+        // Implicit form is unconditionally stable for any dt and reduces to
+        // exact tracking when dt · rate ≫ 1 (≈ explicit semi-implicit).
+        let rate = a_par_now / tau_fast;
+        let m_t_old = m_target[idx];
+        let alpha_dt = rate * dt;
+        new_m_target = (m_t_old + alpha_dt * m_e_now) / (1.0 + alpha_dt);
+    } else {
+        // Collapsed F1 path: m_target tracks m_e instantly.
+        new_m_target = m_e_now;
+    }
+    m_target[idx] = clamp(new_m_target, -1.0, 1.0);
 }

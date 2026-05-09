@@ -164,10 +164,15 @@ struct GpuParams {
     // column index. Zero or negative ⇒ the layer's table is treated as
     // 1D-only (B = 0 column repeated).
     layer_thermal_b_max: [f32; 4],
+    // 704-719: per-layer fast-relaxation time base [s] (Phase F2).
+    // Two-stage LLB: m_target chases m_e(T_s, B) at rate α_par(T)/tau_fast_base,
+    // and |m| chases m_target at rate α_par(T)/tau_long_base.
+    // tau_fast ≤ 0 ⇒ m_target := m_e (collapses to single-stage F1 path).
+    layer_thermal_tau_fast: [f32; 4],
 }
 
 const OFFSET_PULSE_AMPLITUDES: u64 = 400;
-const OFFSET_GPUPARAMS_END: u64 = 704;
+const OFFSET_GPUPARAMS_END: u64 = 720;
 const _: () = assert!(OFFSET_GPUPARAMS_END as usize == std::mem::size_of::<GpuParams>());
 
 impl GpuParams {
@@ -306,6 +311,7 @@ impl GpuParams {
                 [t_amb, 0.0, 0.0, 0.0]
             },
             layer_thermal_b_max: Self::thermal_vec4(cfg, |p| p.b_max_t as f32),
+            layer_thermal_tau_fast: Self::thermal_vec4(cfg, |p| p.tau_fast_base as f32),
         }
     }
 
@@ -381,6 +387,11 @@ pub struct GpuSolver {
     temp_e_buf: wgpu::Buffer,
     temp_p_buf: wgpu::Buffer,
     m_reduced_buf: wgpu::Buffer,
+    // Phase F2 — proxy variable for two-stage longitudinal relaxation.
+    // m_target chases m_e(T_s, B) on tau_fast; |m| chases m_target on
+    // tau_long. When tau_fast ≤ 0 (default presets), m_target is assigned
+    // to m_e directly each step and the chain collapses to F1.
+    m_target_buf: wgpu::Buffer,
     // Table buffers are bound through `bind_group`; no direct writes after
     // creation. Hence the `_` prefix. `chi_par_table` is currently unused
     // by the shader but retained for a future full-Atxitia LLB upgrade —
@@ -525,16 +536,19 @@ impl GpuSolver {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
         });
 
-        // Initialize m_reduced per-cell at m_e(T_ambient) of that cell's layer.
-        // When thermal is None, every cell holds 1.0 as a harmless default.
-        let m_red_init: Vec<f32> = {
+        // Initialize m_reduced and m_target per-cell at m_e(T_ambient, |B_z|).
+        // F2: m_target is the proxy variable bridging m_e and |m| in the
+        // two-stage relaxation chain. Initial value matches m_reduced so the
+        // pre-pulse state has all three (m_e, m_target, |m|) consistent.
+        let b_z_init = config.b_ext[2].abs() as f64;
+        let m_init: Vec<f32> = {
             let mut v = vec![1.0f32; cell_count as usize];
             if let Some(tc) = thermal {
                 let in_plane = (config.geometry.nx * config.geometry.ny) as usize;
                 for cell in 0..cell_count as usize {
                     let iz = cell / in_plane;
                     if let Some(p) = tc.per_layer.get(iz) {
-                        v[cell] = p.sample_m_e(t_ambient as f64) as f32;
+                        v[cell] = p.sample_m_e_2d(t_ambient as f64, b_z_init) as f32;
                     }
                 }
             }
@@ -542,7 +556,12 @@ impl GpuSolver {
         };
         let m_reduced_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("m_reduced"),
-            contents: bytemuck::cast_slice(&m_red_init),
+            contents: bytemuck::cast_slice(&m_init),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        });
+        let m_target_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("m_target"),
+            contents: bytemuck::cast_slice(&m_init),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -605,6 +624,7 @@ impl GpuSolver {
                 bgl_entry(8, wgpu::BufferBindingType::Storage { read_only: false }),
                 bgl_entry(9, wgpu::BufferBindingType::Storage { read_only: true }),
                 bgl_entry(10, wgpu::BufferBindingType::Storage { read_only: true }),
+                bgl_entry(11, wgpu::BufferBindingType::Storage { read_only: false }),
             ],
         });
 
@@ -650,6 +670,7 @@ impl GpuSolver {
                 wgpu::BindGroupEntry { binding: 8, resource: m_reduced_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 9, resource: m_e_table_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 10, resource: chi_par_table_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 11, resource: m_target_buf.as_entire_binding() },
             ],
         });
 
@@ -668,6 +689,7 @@ impl GpuSolver {
             temp_e_buf,
             temp_p_buf,
             m_reduced_buf,
+            m_target_buf,
             _m_e_table_buf: m_e_table_buf,
             _chi_par_table_buf: chi_par_table_buf,
             mag_staging,
@@ -1024,16 +1046,24 @@ impl GpuSolver {
         self.queue.write_buffer(&self.temp_p_buf, 0, bytemuck::cast_slice(&init_t));
 
         let in_plane = (self.config.geometry.nx * self.config.geometry.ny) as usize;
-        let mut m_red = vec![1.0f32; self.cell_count as usize];
+        let b_z = self.config.b_ext[2].abs() as f64;
+        let mut m_init = vec![1.0f32; self.cell_count as usize];
         if let Some(tc) = &self.config.photonic.thermal {
             for cell in 0..self.cell_count as usize {
                 let iz = cell / in_plane;
                 if let Some(p) = tc.per_layer.get(iz) {
-                    m_red[cell] = p.sample_m_e(t_amb as f64) as f32;
+                    m_init[cell] = p.sample_m_e_2d(t_amb as f64, b_z) as f32;
                 }
             }
         }
-        self.queue.write_buffer(&self.m_reduced_buf, 0, bytemuck::cast_slice(&m_red));
+        self.queue.write_buffer(&self.m_reduced_buf, 0, bytemuck::cast_slice(&m_init));
+        self.queue.write_buffer(&self.m_target_buf, 0, bytemuck::cast_slice(&m_init));
+    }
+
+    /// Readback the F2 proxy magnetization buffer (`m_target`).
+    /// Useful for diagnosing the two-stage relaxation chain in tests.
+    pub fn readback_m_target(&self) -> Vec<f32> {
+        self.readback_f32_scalar(&self.m_target_buf, &self.m_reduced_staging)
     }
 
     /// Adjust the shared thermal `t_ambient` without changing presets.

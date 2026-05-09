@@ -174,11 +174,20 @@ pub struct LayerThermalParams {
     pub m_e_table: Vec<f32>,
     /// χ_∥(T_i, B_j) flat row-major same layout. [dimensionless; μ_B / (k_B·T_c)-normalized].
     pub chi_par_table: Vec<f32>,
-    /// LLB longitudinal-relaxation time constant [s]. Effective τ_∥ at temperature T
-    /// is `tau_long_base / α_∥(T)`, where `α_∥(T) = α_0 · 2T/(3 · T_c)`.
-    /// P3b phenomenological form (exponential relaxation to `m_e(T_s)`).
-    /// Default 0.3 fs for ferromagnets (gives ≈10 fs τ_∥ near T_c for α_0 = 0.04).
+    /// LLB **slow** longitudinal-relaxation time constant [s] (Phase F2).
+    /// In the two-stage model, |m| relaxes toward an intermediate target
+    /// `m_target` at rate α_∥(T) / tau_long_base. Default 0.3 fs.
+    /// (Naming preserved from P3b for backward compat — semantically this
+    /// is now τ_slow_base; F2's two-stage chain uses tau_fast_base for the
+    /// upstream m_target → m_e relaxation.)
     pub tau_long_base: f64,
+    /// LLB **fast** longitudinal-relaxation time constant [s] (Phase F2).
+    /// `m_target` chases `m_e(T_s, B)` at rate α_∥(T) / tau_fast_base.
+    /// `tau_fast_base ≤ 0` collapses the chain — `m_target` is assigned to
+    /// `m_e` instantly, reproducing the single-timescale F1 path.
+    /// Calibration target for Zhou-style FGT: ≈ 0.27 fs to give τ_1 ≈ 0.4 ps
+    /// at α_0 = 0.001 near T_c.
+    pub tau_fast_base: f64,
     /// Short human-readable provenance string.
     pub notes: &'static str,
 }
