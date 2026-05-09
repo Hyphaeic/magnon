@@ -76,6 +76,7 @@ struct Params {
     thermal_globals: vec4<f32>,         // (t_ambient, pad, pad, pad)
     layer_thermal_b_max: vec4<f32>,     // Tesla — F1 B-axis ceiling per layer
     layer_thermal_tau_fast: vec4<f32>,  // F2 fast-stage relaxation base time [s]
+    layer_optical_atten: vec4<f32>,     // F3 per-layer attenuation factor [1/m]
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -396,26 +397,30 @@ fn coth_safe(x: f32) -> f32 {
 
 /// Absorbed volumetric power density at cell idx at the current step midpoint
 /// [W/m³]. Returns 0 if no pulse carries fluence (peak_fluence = None on host).
+///
+/// Phase F3: the host writes `pulse_directions[p].w` as the instantaneous
+/// incident-surface power flux [W/m²] (no /thickness baked in). This kernel
+/// multiplies by `params.layer_optical_atten[iz]` to convert to volumetric
+/// power density, where the attenuation factor encodes both the per-layer
+/// thickness and the cumulative Beer-Lambert attenuation through layers
+/// above.
 fn laser_power_density_at(idx: u32) -> f32 {
+    let iz = layer_of(idx);
+    let atten = params.layer_optical_atten[iz];
+    if atten == 0.0 { return 0.0; }
+
     let in_plane_idx = idx % in_plane_count();
     let ix = in_plane_idx / params.ny;
     let iy = in_plane_idx % params.ny;
     let x = (f32(ix) + 0.5) * params.cell_size_m;
     let y = (f32(iy) + 0.5) * params.cell_size_m;
 
-    // Temporal envelope amplitude (linear in pulse_amplitudes[p] / peak_B).
-    // To recover the dimensionless envelope we divide the current amp by
-    // the nominal peak_field uniform — but we don't store that separately.
-    // Instead, host writes envelope directly into `pulse_directions[p].w`
-    // each step: w = (1 − R)·P_peak·envelope_at(t_mid), i.e. instantaneous
-    // peak absorbed volumetric power density [W/m³] BEFORE the spatial
-    // Gaussian.
-    var total: f32 = 0.0;
+    var total_flux: f32 = 0.0;
     for (var p: u32 = 0u; p < params.pulse_count; p = p + 1u) {
         let center = params.pulse_spot_centers[p];
         let sigma = center.z;
-        let p_inst = params.pulse_directions[p].w;
-        if p_inst == 0.0 { continue; }
+        let p_flux = params.pulse_directions[p].w;
+        if p_flux == 0.0 { continue; }
 
         var weight: f32 = 1.0;
         if sigma > 0.0 {
@@ -424,9 +429,9 @@ fn laser_power_density_at(idx: u32) -> f32 {
             let r2 = dx * dx + dy * dy;
             weight = exp(-r2 / (2.0 * sigma * sigma));
         }
-        total = total + p_inst * weight;
+        total_flux = total_flux + p_flux * weight;
     }
-    return total;
+    return total_flux * atten;
 }
 
 /// Koopmans dm/dt term. Evaluates the ferromagnet-saturation-aware form:

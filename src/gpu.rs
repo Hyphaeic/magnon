@@ -169,10 +169,18 @@ struct GpuParams {
     // and |m| chases m_target at rate α_par(T)/tau_long_base.
     // tau_fast ≤ 0 ⇒ m_target := m_e (collapses to single-stage F1 path).
     layer_thermal_tau_fast: [f32; 4],
+    // 720-735: per-layer optical-attenuation factor [1/m] (Phase F3).
+    // Pre-computed by the host so the shader's per-step laser-power-density
+    // calculation is one multiply per cell.
+    //
+    //   uniform mode (skin_depth = 0): factor = 1/t_layer  (pre-F3 behaviour)
+    //   Beer-Lambert  (skin_depth > 0): factor = (∏_{j above} exp(-t_j/δ_j))
+    //                                          · (1 − exp(-t_i/δ_i)) / t_i
+    layer_optical_atten: [f32; 4],
 }
 
 const OFFSET_PULSE_AMPLITUDES: u64 = 400;
-const OFFSET_GPUPARAMS_END: u64 = 720;
+const OFFSET_GPUPARAMS_END: u64 = 736;
 const _: () = assert!(OFFSET_GPUPARAMS_END as usize == std::mem::size_of::<GpuParams>());
 
 impl GpuParams {
@@ -312,7 +320,55 @@ impl GpuParams {
             },
             layer_thermal_b_max: Self::thermal_vec4(cfg, |p| p.b_max_t as f32),
             layer_thermal_tau_fast: Self::thermal_vec4(cfg, |p| p.tau_fast_base as f32),
+            layer_optical_atten: Self::compute_optical_atten(cfg),
         }
+    }
+
+    /// F3: per-layer Beer-Lambert attenuation factor [1/m].
+    ///
+    /// Light is incident on the **top** of the stack (layer index `nz − 1`)
+    /// and propagates downward. For each layer i:
+    ///
+    ///     factor(i) = (∏_{j = i+1 .. nz−1} exp(−t_j / δ_j))
+    ///               · (1 − exp(−t_i / δ_i)) / t_i
+    ///
+    /// When δ_i ≤ 0 (uniform-absorption mode for layer i), the cumulative
+    /// product is left unchanged (no through-attenuation contribution from
+    /// that layer) and the per-layer factor is `1 / t_i`, exactly matching
+    /// the pre-F3 host normalisation.
+    fn compute_optical_atten(cfg: &SimConfig) -> [f32; 4] {
+        let mut out = [0.0f32; 4];
+        let layers = &cfg.stack.layers;
+        let n = layers.len();
+        if n == 0 {
+            return out;
+        }
+        let thermal = cfg.photonic.thermal.as_ref();
+        let mut cumulative_above = 1.0_f64;
+        for iz_rev in (0..n).rev() {
+            let t_i = layers[iz_rev].thickness;
+            let delta = thermal
+                .and_then(|tc| tc.per_layer.get(iz_rev))
+                .map(|p| p.optical_skin_depth_m)
+                .unwrap_or(0.0);
+            let factor = if t_i <= 0.0 {
+                0.0
+            } else if delta <= 0.0 || !delta.is_finite() {
+                // Uniform-absorption mode: pre-F3 behaviour preserved.
+                // No cumulative-attenuation update — physically incoherent in
+                // multilayers but matches the legacy single-layer normalisation.
+                cumulative_above / t_i
+            } else {
+                let absorbed_frac = 1.0 - (-t_i / delta).exp();
+                let f = cumulative_above * absorbed_frac / t_i;
+                cumulative_above *= (-t_i / delta).exp();
+                f
+            };
+            if iz_rev < MAX_LAYERS {
+                out[iz_rev] = factor as f32;
+            }
+        }
+        out
     }
 
     fn thermal_vec4<F>(cfg: &SimConfig, f: F) -> [f32; 4]
@@ -777,12 +833,13 @@ impl GpuSolver {
         // same `pulse_amplitudes` uniform).
         //
         // When a pulse also carries `peak_fluence`, the host also re-writes
-        // `pulse_directions[p].w` to the instantaneous absorbed volumetric
-        // power density [W/m³] at the step midpoint — the M3TM kernel reads
-        // this channel via `laser_power_density_at`. ADR-003 documents this
-        // reuse of the direction-vec4 w-component.
+        // `pulse_directions[p].w` to the instantaneous incident-surface
+        // power flux [W/m²] at the step midpoint. The shader applies the
+        // per-layer attenuation factor `params.layer_optical_atten[iz]`
+        // (Phase F3) to convert this into a per-cell volumetric power
+        // density [W/m³]. ADR-003 documents the reuse of the direction-
+        // vec4 w-component.
         let n_pulses = self.config.photonic.pulses.len().min(4);
-        let layer0_thickness = self.config.stack.layers.first().map(|l| l.thickness).unwrap_or(1e-9);
         for _ in 0..n {
             let dt = self.config.dt;
             let t_mid = self.t_sim + 0.5 * dt;
@@ -809,7 +866,8 @@ impl GpuSolver {
                     let p_w = match pulse.peak_fluence {
                         Some(f) => {
                             let sig = sigma_t(pulse.duration_fwhm).max(1e-18);
-                            (1.0 - pulse.reflectivity as f64) * f / (tau * sig * layer0_thickness) * env
+                            // F3: shader applies the per-layer 1/m attenuation factor.
+                            (1.0 - pulse.reflectivity as f64) * f / (tau * sig) * env
                         }
                         None => 0.0,
                     } as f32;

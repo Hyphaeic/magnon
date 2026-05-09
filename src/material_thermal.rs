@@ -62,6 +62,7 @@ pub fn ni_m3tm() -> LayerThermalParams {
         chi_par_table,
         tau_long_base: 0.3e-15,
         tau_fast_base: 0.0,  // F2: 0 ⇒ collapse to F1 single-stage; recalibrate per-material for two-stage decay.
+        optical_skin_depth_m: 0.0,  // F3: 0 ⇒ uniform-absorption (pre-F3); reference value at 400 nm: 14 nm.
         notes: "Ni M3TM, Koopmans 2010 verified; gamma_e/C_p from Lin-Zhigilei 2008.",
     }
 }
@@ -89,6 +90,7 @@ pub fn py_m3tm() -> LayerThermalParams {
         chi_par_table,
         tau_long_base: 0.3e-15,
         tau_fast_base: 0.0,  // F2: 0 ⇒ collapse to F1 single-stage; recalibrate per-material for two-stage decay.
+        optical_skin_depth_m: 0.0,  // F3 default; reference value at 400 nm: 16 nm.
         notes: "Permalloy Ni80Fe20 M3TM, Battiato 2010 a_sf.",
     }
 }
@@ -117,6 +119,7 @@ pub fn fgt_ni_surrogate() -> LayerThermalParams {
         chi_par_table,
         tau_long_base: 0.3e-15,
         tau_fast_base: 0.0,  // F2: 0 ⇒ collapse to F1 single-stage; recalibrate per-material for two-stage decay.
+        optical_skin_depth_m: 0.0,  // F3 default; reference value at 400 nm: 18 nm.
         notes: "FGT thermal — Ni a_sf surrogate, UNCALIBRATED. Fit vs Zhou 2025 in P5.",
     }
 }
@@ -144,6 +147,7 @@ pub fn yig_inert() -> LayerThermalParams {
         chi_par_table,
         tau_long_base: 0.3e-15,
         tau_fast_base: 0.0,  // F2: 0 ⇒ collapse to F1 single-stage; recalibrate per-material for two-stage decay.
+        optical_skin_depth_m: 0.0,  // F3: YIG is largely transparent at visible; uniform mode is harmless because a_sf ≈ 0.
         notes: "YIG inert — insulator, M3TM source effectively zero.",
     }
 }
@@ -198,6 +202,7 @@ pub fn cofeb_m3tm() -> LayerThermalParams {
         chi_par_table,
         tau_long_base: 0.3e-15,
         tau_fast_base: 0.0,  // F2: 0 ⇒ collapse to F1 single-stage; recalibrate per-material for two-stage decay.
+        optical_skin_depth_m: 0.0,  // F3 default; reference value at 400 nm: 17 nm.
         notes: "CoFeB M3TM (Sato 2018 Bloch exponent β=1.73, a_sf fit).",
     }
 }

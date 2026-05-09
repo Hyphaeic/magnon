@@ -188,6 +188,12 @@ pub struct LayerThermalParams {
     /// Calibration target for Zhou-style FGT: ≈ 0.27 fs to give τ_1 ≈ 0.4 ps
     /// at α_0 = 0.001 near T_c.
     pub tau_fast_base: f64,
+    /// Optical skin depth [m] at the laser wavelength (Phase F3).
+    /// Beer-Lambert profile: P_in_layer × (1 − exp(−t/δ)) / t after
+    /// attenuating through layers above it. `0.0` (default) = uniform-
+    /// absorption mode preserving the pre-F3 single-layer normalisation.
+    /// Typical 400 nm values: Ni 14 nm, Py 16 nm, CoFeB 17 nm, FGT ~18 nm.
+    pub optical_skin_depth_m: f64,
     /// Short human-readable provenance string.
     pub notes: &'static str,
 }
