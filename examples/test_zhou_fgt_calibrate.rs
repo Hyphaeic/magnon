@@ -58,28 +58,40 @@ use magnonic_clock_sim::material_thermal;
 use magnonic_clock_sim::photonic::{parse_pulse_spec, ThermalConfig};
 use magnonic_clock_sim::substrate::Substrate;
 
-// ─── Fixed operating point ───────────────────────────────
-const T_AMBIENT_K: f32 = 150.0;
+// ─── Fixed operating point (Zhou 2025 literal, post-F1) ────
+// Pre-F1 the calibration shifted to T = 150 K because zero-field tables
+// made T = T_c degenerate. After F1 (field-dependent m_e tables) the
+// equilibrium m_e(T_c, 1 T) is well-defined, so we now run at the
+// experiment's literal operating point.
+const T_AMBIENT_K: f32 = 210.0;
 const T_C_K: f64 = 210.0;
 const B_EXT_T: f64 = 1.0;
 const FLUENCE_MJ_CM2: f64 = 0.24;
 const PULSE_FWHM_FS: f64 = 150.0;
 const FLAKE_THICKNESS_NM: f64 = 5.0;
+// F3: optical skin depth fixed at the FGT-at-400nm physics estimate. Kept
+// out of the grid because it has a direct measurement; calibration handles
+// stay on the dynamic-physics side.
+const SKIN_DEPTH_M: f64 = 18.0e-9;
 
 // Fit targets (Zhou 2025 aggregate morphology)
 const TARGET_DEMAG_FRAC: f64 = 0.79;
 const TARGET_RECOVERY_FRAC: f64 = 0.55;
 
-// Grid: tau_long_base sets LLB τ_∥(T_c) = tau_long_base / α_par(T_c) (~fs-scale).
-// Longer tau_long_base → slower longitudinal relaxation → demag can't fully
-// reach m_e(T_s) during the brief T_s > T_c window.
-const TAU_LONG_GRID: &[f64] = &[0.1e-15, 0.3e-15, 1.0e-15, 3.0e-15, 10.0e-15];
-const R_GRID: &[f32] = &[0.10, 0.30, 0.50, 0.70, 0.85];
-const G_SUB_GRID: &[f64] = &[5.0e16, 1.0e17, 2.0e17, 5.0e17, 1.0e18];
+// Grid axes (post-F1+F2+F3):
+// tau_long_base — slow LLB longitudinal stage (was the only LLB knob pre-F2).
+// tau_fast_base — fast LLB stage (new in F2; m_target chases m_e on this).
+// R              — pulse reflectivity (compensates absorption uncertainty).
+// g_sub_phonon  — phonon→substrate sink (controls recovery τ_2).
+const TAU_LONG_GRID: &[f64] = &[1.0e-15, 3.0e-15, 10.0e-15];
+const TAU_FAST_GRID: &[f64] = &[0.1e-15, 0.3e-15, 1.0e-15];
+const R_GRID: &[f32] = &[0.30, 0.50, 0.70];
+const G_SUB_GRID: &[f64] = &[1.0e17, 3.0e17, 1.0e18];
 
 #[derive(Clone, Debug)]
 struct TrialMetrics {
     tau_long: f64,
+    tau_fast: f64,
     r: f32,
     g_sub: f64,
     demag_frac: f64,
@@ -91,11 +103,13 @@ struct TrialMetrics {
     loss: f64,
 }
 
-fn run_trial(tau_long: f64, r: f32, g_sub: f64) -> TrialMetrics {
+fn run_trial(tau_long: f64, tau_fast: f64, r: f32, g_sub: f64) -> TrialMetrics {
     let mut preset = material_thermal::fgt_ni_surrogate();
     preset.t_c = T_C_K;
     preset.tau_long_base = tau_long;
+    preset.tau_fast_base = tau_fast;
     preset.g_sub_phonon = g_sub;
+    preset.optical_skin_depth_m = SKIN_DEPTH_M;
     let (m_e_table, chi_table) =
         material_thermal::brillouin_tables_spin_half_2d(
             preset.t_c, preset.llb_table_n, preset.llb_table_n_b, preset.b_max_t,
@@ -172,6 +186,7 @@ fn run_trial(tau_long: f64, r: f32, g_sub: f64) -> TrialMetrics {
 
     TrialMetrics {
         tau_long,
+        tau_fast,
         r,
         g_sub,
         demag_frac,
@@ -185,11 +200,11 @@ fn run_trial(tau_long: f64, r: f32, g_sub: f64) -> TrialMetrics {
 }
 
 fn main() {
-    let n_trials = TAU_LONG_GRID.len() * R_GRID.len() * G_SUB_GRID.len();
-    println!("=== FGT Zhou-morphology calibration, grid search ({} trials) ===", n_trials);
+    let n_trials = TAU_LONG_GRID.len() * TAU_FAST_GRID.len() * R_GRID.len() * G_SUB_GRID.len();
+    println!("=== FGT Zhou-morphology calibration (F1+F2+F3), grid search ({} trials) ===", n_trials);
     println!(
-        "Operating point: T = {} K, B_z = {} T, F = {} mJ/cm², FWHM = {} fs, t = {} nm FGT",
-        T_AMBIENT_K, B_EXT_T, FLUENCE_MJ_CM2, PULSE_FWHM_FS, FLAKE_THICKNESS_NM,
+        "Operating point: T = {} K, B_z = {} T, F = {} mJ/cm², FWHM = {} fs, t = {} nm FGT, δ = {} nm",
+        T_AMBIENT_K, B_EXT_T, FLUENCE_MJ_CM2, PULSE_FWHM_FS, FLAKE_THICKNESS_NM, SKIN_DEPTH_M * 1e9,
     );
     println!(
         "Targets:  demag_frac = {:.2}   recovery_frac(22 ps) = {:.2}",
@@ -201,15 +216,17 @@ fn main() {
     let t0 = std::time::Instant::now();
     let mut count = 0usize;
     for &tau_long in TAU_LONG_GRID {
-        for &r in R_GRID {
-            for &g_sub in G_SUB_GRID {
-                count += 1;
-                let m = run_trial(tau_long, r, g_sub);
-                eprintln!(
-                    "[{count:3}/{n_trials}] τ_L={:.1}fs R={:.2} g_sub={:.1e} → demag={:.2} rec={:.2} L={:.4}",
-                    m.tau_long * 1e15, m.r, m.g_sub, m.demag_frac, m.recovery_frac, m.loss,
-                );
-                results.push(m);
+        for &tau_fast in TAU_FAST_GRID {
+            for &r in R_GRID {
+                for &g_sub in G_SUB_GRID {
+                    count += 1;
+                    let m = run_trial(tau_long, tau_fast, r, g_sub);
+                    eprintln!(
+                        "[{count:3}/{n_trials}] τ_L={:.1}fs τ_F={:.1}fs R={:.2} g_sub={:.1e} → demag={:.2} rec={:.2} L={:.4}",
+                        m.tau_long * 1e15, m.tau_fast * 1e15, m.r, m.g_sub, m.demag_frac, m.recovery_frac, m.loss,
+                    );
+                    results.push(m);
+                }
             }
         }
     }
@@ -221,13 +238,13 @@ fn main() {
     println!();
     println!("Top 5 by loss (lower = closer to Zhou morphology):");
     println!(
-        "  {:>7} {:>5} {:>10} | {:>6} {:>6} | {:>6} {:>6} {:>6} {:>7} | {:>6}",
-        "τ_L[fs]", "R", "g_sub", "demag", "rec22", "m_ini", "m_min", "m_22", "t_min", "loss"
+        "  {:>7} {:>7} {:>5} {:>10} | {:>6} {:>6} | {:>6} {:>6} {:>6} {:>7} | {:>6}",
+        "τ_L[fs]", "τ_F[fs]", "R", "g_sub", "demag", "rec22", "m_ini", "m_min", "m_22", "t_min", "loss"
     );
     for m in results.iter().take(5) {
         println!(
-            "  {:>7.2} {:>5.2} {:>10.2e} | {:>6.3} {:>6.3} | {:>6.3} {:>6.3} {:>6.3} {:>5.2}ps | {:>6.4}",
-            m.tau_long * 1e15, m.r, m.g_sub,
+            "  {:>7.2} {:>7.2} {:>5.2} {:>10.2e} | {:>6.3} {:>6.3} | {:>6.3} {:>6.3} {:>6.3} {:>5.2}ps | {:>6.4}",
+            m.tau_long * 1e15, m.tau_fast * 1e15, m.r, m.g_sub,
             m.demag_frac, m.recovery_frac,
             m.m_initial, m.m_floor, m.m_22ps, m.t_min_ps,
             m.loss,
@@ -237,8 +254,8 @@ fn main() {
     println!();
     println!("=== BEST FIT ===");
     println!(
-        "tau_long_base = {:.3e} s, reflectivity = {:.2}, g_sub_phonon = {:.3e} W/(m³·K)",
-        best.tau_long, best.r, best.g_sub,
+        "tau_long_base = {:.3e} s  tau_fast_base = {:.3e} s  R = {:.2}  g_sub = {:.3e} W/(m³·K)",
+        best.tau_long, best.tau_fast, best.r, best.g_sub,
     );
     println!(
         "Observed: demag = {:.1} % (target 79%),  recovery@22ps = {:.1} % (target 55%)",
@@ -247,8 +264,10 @@ fn main() {
 
     println!();
     println!("--- Ready-to-paste preset update (src/material_thermal.rs) ---");
-    println!("// FGT — Zhou 2025 calibrated (T = {} K, B = 1 T, F = 0.24 mJ/cm² morphology fit)", T_AMBIENT_K);
-    println!("tau_long_base: {:.3e},  // was 0.3e-15", best.tau_long);
-    println!("g_sub_phonon:  {:.3e},  // was 2.0e16", best.g_sub);
+    println!("// FGT — Zhou 2025 calibrated (T = T_c = {} K, B = 1 T, F = 0.24 mJ/cm² morphology fit, post-F1/F2/F3)", T_AMBIENT_K);
+    println!("tau_long_base:    {:.3e},", best.tau_long);
+    println!("tau_fast_base:    {:.3e},", best.tau_fast);
+    println!("g_sub_phonon:     {:.3e},", best.g_sub);
+    println!("optical_skin_depth_m: {:.1e},", SKIN_DEPTH_M);
     println!("(reflectivity {:.2} should be applied on the pulse, not the preset)", best.r);
 }

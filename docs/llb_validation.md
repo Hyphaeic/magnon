@@ -9,18 +9,25 @@ Simulator: `magnonic-clock-sim` @ commit tagged `p3c` (parent of
 
 ---
 
-## 1. Summary of regression gates (all passing at P3c)
+## 1. Summary of regression gates (all passing at head, post-F1/F2/F3)
 
 | Gate | Measurement | Result | Tolerance | Reference |
 |---|---|---|---|---|
 | LLG bit-identical when thermal disabled | `min_norm / max_norm` columns over 2000 steps | **byte-for-byte match** | exact | baseline CSV, `examples/test_m3tm_gpu_vs_host.rs` |
-| GPU M3TM vs host reference, 1 mJ/cm² Ni, 3 ps | max relative on T_e / max absolute on \|m\| | **8.81·10⁻⁷ / 1.25·10⁻⁶** | 1·10⁻³ | `examples/test_m3tm_gpu_vs_host.rs` |
+| GPU M3TM vs host reference, 1 mJ/cm² Ni, 3 ps | max relative on T_e / max absolute on \|m\| | **1.04·10⁻⁶ / 9.51·10⁻⁷** | 1·10⁻³ | `examples/test_m3tm_gpu_vs_host.rs` |
 | LLB → LLG reduction at T=0 K (deterministic skyrmion) | max abs. on (avg_mx, avg_my, avg_mz) over 2000 steps | **1.5·10⁻⁴ / 1.3·10⁻⁴ / 4.5·10⁻⁶** | 1·10⁻³ | `examples/test_sp4_proxy.rs` |
-| LLB demag + recovery, 1 mJ/cm² Ni, 10 ps | \|m\|_floor, \|m\|(t=10 ps) | **0.000, 0.816** | ≠1 with no NaN | `examples/test_llb_ni_demag.rs` |
+| LLB demag + recovery, 1 mJ/cm² Ni, 10 ps | \|m\|_floor, \|m\|(t=10 ps) | **0.000, 0.832** | ≠1 with no NaN | `examples/test_llb_ni_demag.rs` |
 | Energy balance, Beaurepaire config | (Δ U_e + Δ U_p) / E_laser | **1.000** | 1.00 ± 0.05 | `examples/test_beaurepaire_ni.rs` |
-| Beaurepaire amplitude, 7 mJ/cm² Ni | \|m\|(500 fs) | **0.000** | 0.60 ± 0.05 (plan target) | see §3.2 |
+| Beaurepaire amplitude, 7 mJ/cm² Ni | \|m\|(500 fs) | **0.000** | 0.60 ± 0.05 (plan target) | see §3.2 — model-limited |
+| **F1**: m_e field-dependence monotone in B at 4 temperatures | spot-check on `sample_m_e_2d` | **PASS** | non-decreasing in B | `material_thermal::tests::m_e_field_dependence_monotone` |
+| **F2**: two-stage chain reproduces F1 when tau_fast=0 | max \|m_target − m_e\| | **0.0000** | < 0.01 | `examples/test_llb_two_stage.rs` (case A) |
+| **F2**: tau_fast > 0 produces measurable lag | max \|m_target − m_e\| at 5×τ_long | **0.7747** | > 0.05 | `examples/test_llb_two_stage.rs` (case B) |
+| **F3**: uniform mode → identical top/bot peaks | \|ΔT_e_peak\| (2-layer 20 nm × 20 nm Ni) | **0.00 K** | < 1 K | `examples/test_optical_skin_depth.rs` (case A) |
+| **F3**: Beer-Lambert produces top-vs-bot split | ΔT_e_peak at δ=14 nm on 20 nm × 20 nm | **360 K** | > 50 K | `examples/test_optical_skin_depth.rs` (case B) |
+| **Zhou recalibration (T=Tc=210K, B=1T)** | demag fraction / recovery@22ps | **0.776 / 0.552** | targets 0.79 / 0.55 (loss 0.0002) | `examples/test_zhou_fgt_calibrate.rs`, ADR-006 |
+| 12 lib unit tests | green | **12/12 PASS** | all | `cargo test --release --lib` |
 
-The amplitude miss is a known scope limit — see §3.2.
+The Beaurepaire 7 mJ/cm² amplitude miss is a known model-scope limit — see §3.2.
 
 ## 2. Substitutions and deferrals
 
@@ -30,9 +37,9 @@ The amplitude miss is a known scope limit — see §3.2.
 
     d|m|/dt|_long = (α_∥(T_s) / tau_long_base) · (m_e(T_s) − |m|) · m̂
 
-which reduces cleanly to LLG at T = 0 and captures the ultrafast-demag timescale by tuning `tau_long_base`. The Atxitia form with χ_∥⁻¹ as the effective-field prefactor is deferred; the `chi_par_table` storage buffer remains bound and populated for a drop-in upgrade. `tau_long_base` is the P3c calibration handle.
+F2 generalised this to a two-stage chain via the `m_target` proxy variable (see §7.2 for details), but the χ_∥-coupled Atxitia form remains a future upgrade: the `chi_par_table` storage buffer is bound and populated as a 2D (T, B) table after F1, but the shader's longitudinal torque still uses the phenomenological form. Drop-in replacement is mechanical when prioritised.
 
-**Beaurepaire quantitative calibration.** At 7 mJ/cm² absorbed into a 20 nm single-cell Ni-parameterized film without lateral heat diffusion, the phonon bath equilibrates above T_c and stays there over the 10 ps window, pinning \|m\| at 0. Plan §1 already flagged in-plane ∇²T diffusion as P6+ scope. Fluence calibration against the two-parameter (a_sf, R) fit is a P5 task, not P3c. See §3.2.
+**Beaurepaire quantitative calibration.** At 7 mJ/cm² absorbed into a 20 nm single-cell Ni-parameterised film without lateral heat diffusion, the phonon bath equilibrates above T_c and stays there over the 10 ps window, pinning \|m\| at 0. Plan §1 already flagged in-plane ∇²T diffusion as P6+ scope. F3's Beer-Lambert improves volumetric-energy accounting in multilayers but does NOT add lateral diffusion — the Beaurepaire 7 mJ/cm² amplitude target remains model-limited. See §3.2.
 
 ## 3. Traces and numbers
 
@@ -140,6 +147,107 @@ cargo run --release --example test_sp4_proxy
 cargo run --release --example test_llb_reduces_to_llg
 cargo run --release --example test_llb_ni_demag
 cargo run --release --example test_beaurepaire_ni
+cargo run --release --example test_llb_two_stage          # F2 acceptance
+cargo run --release --example test_optical_skin_depth     # F3 acceptance
+cargo run --release --example test_zhou_fgt_calibrate     # 81-trial Zhou recalibration (~13 min)
 ./target/release/magnonic-sim --benchmark beaurepaire-ni
 ./target/release/magnonic-sim --benchmark mumag-sp4-proxy
 ```
+
+## 7. F-tier physics upgrades
+
+After P3c the physics surface had three documented blockers:
+field-degeneracy at T = T_c, single-timescale LLB, and uniform-absorption
+energy normalisation. F1, F2, F3 closed each in turn. The numerical
+results below all use commits at or after each F-tier landing — no
+P3 regression is broken by the F additions.
+
+### 7.1 F1 — field-dependent m_e(T, B) (`d67de1d`)
+
+Replaces the 1D Brillouin / MFA tables with a 2D solve of
+`m = tanh((m + h)·T_c/T)`, where `h = g·μ_B·B / (k_B·T_c)` is the
+reduced Zeeman temperature. h = 0 reduces to the original equation
+exactly.
+
+Key numerical results (FGT preset, T_c = 210 K):
+
+| (T, B) | m_e value | Physical meaning |
+|---|---|---|
+| (0 K, 0) | 1.0000 | Saturation |
+| (T_c, 0) | 0.0000 | Critical point at B=0 (degenerate pre-F1) |
+| (T_c, 1 T) | **0.264** | Field-induced equilibrium — what Zhou measures |
+| (T_c, 10 T) | 0.604 | Saturation under strong field |
+| (1.5·T_c, 0) | 0.0000 | Paramagnetic |
+
+The (T_c, 1 T) cell going from 0 → 0.264 is what makes the literal-
+operating-point Zhou calibration possible.
+
+### 7.2 F2 — two-timescale longitudinal LLB (`97e686c`)
+
+Replaces single-stage exponential relaxation with a two-stage chain:
+
+    dm_target/dt = α_par(T_s) · (m_e(T_s, B) − m_target) / tau_fast_base
+       d|m|/dt   = α_par(T_s) · (m_target  − |m|)        / tau_long_base
+
+`m_target` is a per-cell proxy variable in a new GPU buffer (binding 11).
+Updated in `advance_m3tm` via implicit Euler (unconditionally stable);
+the LLB torque kernel reads `m_target` instead of computing `m_e` directly.
+When `tau_fast_base ≤ 0` the chain collapses to F1's single-stage form.
+
+Acceptance results (single-cell Ni / 1 mJ/cm² / 100 fs FWHM pulse):
+
+| Case | tau_fast/tau_long | max\|m_target − m_e\| | \|m\|_floor | \|m\|@10 ps |
+|---|---|---|---|---|
+| A (F1 collapse) | 0 | **0.0000** (instant) | 0.000 | 0.832 |
+| B | 5× | 0.7747 | 0.000 | 0.832 |
+| C | 50× | 0.9419 | **0.105** | 0.831 |
+
+Case C demonstrates the slow-stage rate-limiting effect: with τ_fast
+much greater than the pulse duration, the proxy can't track m_e all
+the way down, so |m| can't reach 0 either — exactly the bi-exponential
+signature Zhou observes.
+
+### 7.3 F3 — Beer-Lambert per-layer absorption (`99a507f`)
+
+Per-layer attenuation factor pre-computed on host:
+
+    uniform mode (δ ≤ 0): factor = 1/t_i    (pre-F3 normalisation preserved)
+    Beer-Lambert (δ > 0): factor = (∏_{j > i} exp(−t_j / δ_j))
+                                  · (1 − exp(−t_i / δ_i)) / t_i
+
+Uploaded as `layer_optical_atten: vec4<f32>` at offset 720 (struct
+720 → 736 B). Shader `laser_power_density_at` multiplies the surface
+flux [W/m²] by this factor to recover volumetric power [W/m³].
+
+Acceptance result (2-layer 20 nm × 20 nm Ni-like stack):
+
+| Mode | Top T_e peak | Bottom T_e peak | Δ |
+|---|---|---|---|
+| Uniform (δ = 0) | 953.40 K | 953.40 K | 0 K |
+| Beer-Lambert (δ = 14 nm) | **841 K** | **481 K** | **360 K** |
+
+The 360 K split matches the expected `e^(-20/14) ≈ 0.24` transmittance
+through the top 20 nm layer.
+
+### 7.4 Zhou recalibration at the literal operating point (ADR-006)
+
+After F1+F2+F3, `examples/test_zhou_fgt_calibrate` was rerun at the
+**literal Zhou operating point** (T = T_c = 210 K, B = 1 T, F = 0.24
+mJ/cm², 150 fs, 5 nm flake) over an 81-trial 4-axis grid:
+
+| Parameter | Calibrated | Pre-F1 (ADR-005, T=150K shifted) |
+|---|---|---|
+| `tau_long_base` | 1.0 fs | 3.0 fs |
+| `tau_fast_base` (F2) | 0.3 fs | 0 (collapsed) |
+| `g_sub_phonon` | 3·10¹⁷ W/(m³·K) | 2·10¹⁷ |
+| `optical_skin_depth_m` (F3) | 18 nm (fixed) | 0 (uniform) |
+| operating T | **T_c = 210 K** | 150 K |
+
+| Observable | Simulated | Zhou target | Residual |
+|---|---|---|---|
+| demag fraction | 0.776 | 0.79 | 1.4 pp |
+| recovery@22 ps | 0.552 | 0.55 | 0.2 pp |
+| **Loss** | **0.0002** | 0 | **35× tighter than pre-F1 best of 0.0070** |
+
+Captured in `material_thermal::fgt_zhou_calibrated()`. ADR-006 records
+the supersession of ADR-005's shifted-operating-point preset.

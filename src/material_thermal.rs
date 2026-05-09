@@ -152,30 +152,34 @@ pub fn yig_inert() -> LayerThermalParams {
     }
 }
 
-/// FGT — **Zhou 2025 morphology-calibrated** (not a literal reproduction).
+/// FGT — **Zhou 2025 morphology-calibrated** at the literal operating point
+/// (post-F1/F2/F3 — see ADR-006).
 ///
-/// Derived from `fgt_ni_surrogate` with two parameters tuned against Zhou et
-/// al. *Natl. Sci. Rev.* 12, nwaf185 (2025) *aggregate morphology* at
-/// T = 150 K, B_z = 1 T, F = 0.24 mJ/cm², 150 fs pulse on a 5 nm flake.
-/// See `docs/zhou_fgt_calibration.md` and ADR-005 for the full set of
-/// assumptions — including the temperature shift from Zhou's T = T_c = 210 K
-/// to T = 150 K (our zero-field tables make T = T_c degenerate).
+/// Derived from `fgt_ni_surrogate` with four parameters tuned against
+/// Zhou et al. *Natl. Sci. Rev.* 12, nwaf185 (2025) aggregate morphology at
+/// T = T_c = 210 K, B_z = 1 T, F = 0.24 mJ/cm², 150 fs pulse on a 5 nm flake.
+/// The pre-F1 calibration ran at T = 150 K because the zero-field tables
+/// made T = T_c degenerate; F1's 2D (T, B) tables remove that obstruction
+/// so this preset now reflects Zhou's actual experimental conditions.
 ///
 /// Fit numbers (best-fit grid point from `examples/test_zhou_fgt_calibrate.rs`):
-///   demag fraction = 86.5 % (Zhou target 79 %)
-///   recovery fraction at 22 ps = 60.1 % (Zhou target ≈ 55 %)
+///   demag fraction          = 77.6 % (Zhou target 79 %)
+///   recovery fraction @22ps = 55.2 % (Zhou target ≈ 55 %)
+///   Loss = 0.0002 (35× tighter than the pre-F1 best of 0.0070).
 ///
-/// Use this preset only with reflectivity = 0.50 applied on the pulse spec.
+/// Use this preset with reflectivity = 0.50 applied on the pulse spec.
 pub fn fgt_zhou_calibrated() -> LayerThermalParams {
     let mut p = fgt_ni_surrogate();
     p.t_c = 210.0;
+    p.tau_long_base = 1.0e-15;     // F2 slow stage (was 3.0 fs at T=150K fit)
+    p.tau_fast_base = 0.3e-15;     // F2 fast stage (was 0; collapsed F1 path)
+    p.g_sub_phonon  = 3.0e17;      // F2 substrate sink (was 2e17)
+    p.optical_skin_depth_m = 18.0e-9;  // F3 FGT @ 400 nm
     let (m_e, chi) =
         brillouin_tables_spin_half_2d(p.t_c, p.llb_table_n, p.llb_table_n_b, p.b_max_t);
     p.m_e_table = m_e;
     p.chi_par_table = chi;
-    p.tau_long_base = 3.0e-15;
-    p.g_sub_phonon = 2.0e17;
-    p.notes = "FGT Zhou 2025 morphology fit at T=150K B=1T (see docs/zhou_fgt_calibration.md + ADR-005). NOT a literal T_c reproduction.";
+    p.notes = "FGT Zhou 2025 morphology fit at T=Tc=210K B=1T (post-F1/F2/F3, see docs/zhou_fgt_calibration.md + ADR-006).";
     p
 }
 
