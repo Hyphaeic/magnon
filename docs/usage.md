@@ -1,626 +1,427 @@
-# Magnonic Clock Simulator — Usage Guide
+# Usage guide
 
-**A Rust/WebGPU parametric explorer for magnonic time crystal behavior in 2D van der Waals magnet heterostructures.**
-
-This guide covers: how to build it, how to run each binary, how to compose design choices, and how to interpret what comes out. For the physics derivations and material parameter literature review, see `docs/plan.md` and `docs/viability-report.md`.
+Current CLI surface, dashboard keymap, preset libraries.
 
 ---
 
-## 1. What this simulator does
+## 1. Binaries
 
-It answers three classes of questions about thin-film ferromagnet design:
+| Binary | Purpose | Build |
+|---|---|---|
+| `magnonic-sim` | headless solver, dump CSV | `cargo build --release --bin magnonic-sim` |
+| `magnonic-sweep` | parametric sweep harness | `cargo build --release --bin magnonic-sweep` |
+| `magnonic-dashboard` | interactive viewer | `cargo build --release --bin magnonic-dashboard --features gui` |
 
-1. **Dynamics:** given a material, substrate, and geometry, how does the magnetization evolve? What frequencies does it precess at? How quickly does it damp?
-2. **Stability:** can a specific configuration (uniform state, domain wall, skyrmion) survive in this parameter regime?
-3. **Viability:** across a sweep of design choices, which combinations produce a usable magnonic clock (high Q-factor, stable frequency)?
-
-The core is a 2D projected-Heun LLG solver running on wgpu compute shaders. Substrate physics (interfacial anisotropy, spin pumping, exchange bias, interfacial DMI, spin-orbit torque) is separated from bulk material properties and composed via film thickness — the "substrate-aware parametric explorer" design of `docs/plan.md`.
-
-### Three binaries
-
-| Binary | Purpose | Feature required |
-|--------|---------|------------------|
-| `magnonic-sim` | Headless single run, prints CSV to stdout | (default) |
-| `magnonic-dashboard` | Interactive GUI with live heatmap + plot strip | `--features gui` |
-| `magnonic-sweep` | Parametric sweep, writes CSV to file | (default) |
+Examples (regression-gate / acceptance probes) live in `examples/` and
+run with `cargo run --release --example <name>`.
 
 ---
 
-## 2. Prerequisites & building
-
-### System requirements
-
-- **Rust** 1.85+ (project uses edition 2021)
-- **GPU** with Vulkan / Metal / DX12 support and WebGPU-compatible drivers
-  - NVIDIA: any recent driver with Vulkan
-  - AMD: RADV driver or official
-  - Intel: ANV driver on Linux, recent Windows drivers
-  - Apple: Metal (all modern Macs)
-- **Linux X11/Wayland** if running the dashboard (uses `minifb`)
-
-### Build commands
-
-Project lives at `branches/hir/projects/magnonic-clock-sim/`. From that directory:
+## 2. `magnonic-sim` — headless solver
 
 ```bash
-# Headless + sweep only (no GUI)
-cargo build --release
-
-# Everything including dashboard
-cargo build --release --features gui
+./target/release/magnonic-sim [options]
 ```
 
-The release build takes 30–60 seconds from a clean state. Binaries land in `target/release/`.
+CSV is written to stdout; status / diagnostics go to stderr.
 
-### Quick sanity check
+### 2.1 Geometry / material
 
-```bash
-./target/release/magnonic-sim --nx 64 --ny 64 --steps 1000 --interval 100
+```
+--nx N                  in-plane cells along x         (default 256)
+--ny N                  in-plane cells along y         (default 256)
+--cell-size NM          in-plane cell size [nm]         (default 2.5)
+--material NAME         single-layer bulk material     (default fgt-bulk)
+--substrate NAME        substrate (bottom interface)   (default vacuum)
+--thickness NM          first-layer thickness [nm]     (default 0.7)
+--stack "M1:T,M2:T,..." multi-layer spec, comma-separated
+                        e.g. "yig:2.0,fgt-bulk:0.7"
+--interlayer-a F1,F2,…  interlayer A [J/m] (N_layers − 1 values)
+--layer-spacing NM,…    per-interface z-spacing [nm]
+--probe-layer N         which layer the probe samples  (default 0)
 ```
 
-Should produce ~12 lines of CSV and finish in under a second. If this works, the GPU is detected and the solver compiles.
+Run `--list-materials` and `--list-substrates` to print the catalogue
+with their parameters.
+
+### 2.2 Conditions
+
+```
+--bx F / --by F / --bz F   external B [T]
+--jx F / --jy F / --jz F   charge current density [A/m²] (SOT drive of layer 0)
+--dt F                     timestep [s]                (default 1e-14)
+--alpha F                  override Gilbert α (first layer)
+--a-ex F                   override A_ex
+--k-u F                    override K_u
+--ms F                     override Ms
+--d-dmi F                  override substrate DMI
+--theta-sh F               override substrate spin-Hall angle
+--init MODE                uniform | random | stripe | skyrmion | alternating
+--skyrmion-radius NM       (for --init skyrmion)
+```
+
+### 2.3 Run control
+
+```
+--steps N           total steps        (default 10000)
+--interval N        readback interval  (default 100)
+```
+
+### 2.4 Photonic / IFE pulses
+
+```
+--pulse "t=T,fwhm=W,peak=B,dir=D[,x=X,y=Y,sigma=S][,fluence=F[,R=Rho]]"
+```
+
+Keys:
+
+| Key | Meaning | Default unit |
+|---|---|---|
+| `t` | pulse centre time | ps |
+| `fwhm` | temporal FWHM | fs |
+| `peak` | IFE-equivalent peak field | T |
+| `dir` | polarisation: `x`,`y`,`z`,`-x`,`-y`,`-z` or `a,b,c` | unit vec |
+| `x`, `y` | spot centre | nm |
+| `sigma` | 1-σ beam radius (0 = uniform) | nm |
+| `fluence` | absorbed peak fluence (engages M3TM source) | mJ/cm² |
+| `R` | reflectivity 0..1 | dimensionless |
+
+Up to 4 pulses; max enforced.
+
+### 2.5 Thermal / LLB (Phase P3+)
+
+```
+--enable-thermal             attach a default ThermalConfig (M3TM observables)
+--enable-llb                 engage LLB integrator (implies --enable-thermal)
+--thermal-params-for KEY     ni | py | fgt | fgt-zhou | yig | cofeb (default fgt)
+--t-ambient K                ambient bath T (default 300)
+--thermal-dt-cap F           timestep cap during pulse window [s] (advisory)
+```
+
+### 2.6 Canonical benchmarks
+
+One-line shortcuts:
+
+```
+--benchmark beaurepaire-ni     20 nm Ni, 100 fs, 7 mJ/cm², T_amb=300 K, LLB on
+--benchmark mumag-sp4-proxy    deterministic skyrmion + 10 mT bias, LLB at T=0
+```
+
+Output schema:
+
+```
+step,time_ps,avg_mx,avg_my,avg_mz,min_norm,max_norm,probe_mz,max_t_e,max_t_p,min_m_reduced
+```
 
 ---
 
-## 3. Design choices: material × substrate × geometry
-
-Every simulation is parameterized by three tiers, which combine to produce the effective parameters the GPU actually sees. This lets you vary **physical design intent** (which bulk material? on which substrate? how thick?) instead of wrangling unlabeled effective numbers.
-
-### Bulk materials
+## 3. `magnonic-sweep` — parametric sweeps
 
 ```bash
-./target/release/magnonic-sim --list-materials
+./target/release/magnonic-sweep [options] -o sweep.csv
 ```
 
-| Key | Origin | Use for |
-|-----|--------|---------|
-| `fgt-bulk` (default) | Leon-Brito 2016 bulk crystal | Substrate-free FGT reference |
-| `fgt-effective` (alias `fgt-garland`) | Garland 2026 sim values | Reproducing published simulations |
-| `fga-te2-bulk` | Fe₃GaTe₂, room-temperature vdW ferromagnet | Room-T operation |
-| `cri3-bulk` | Monolayer CrI₃ | Strong PMA, cryogenic |
-| `cofeb-bulk` | CoFeB thin-film | PMA workhorse (MTJs, MRAM) |
-| `permalloy-bulk` (alias `py`) | Ni₈₀Fe₂₀ | Isotropic, soft, magnonics reference |
-
-### Substrates
-
-```bash
-./target/release/magnonic-sim --list-substrates
-```
-
-| Key | Contributes |
-|-----|-------------|
-| `vacuum` (default) | Nothing — baseline isolated film |
-| `sio2` | Weak, disordered interface |
-| `hbn` | Clean vdW interface, minimal coupling |
-| `pt` | Strong interfacial DMI, large spin pumping, SOT via spin Hall |
-| `wte2` | Topological substrate, chiral DMI (Wu 2020) |
-| `yig` | Insulator, ultra-low damping magnon transport |
-| `irmn` | Antiferromagnetic pinning (exchange bias) |
-
-Each substrate carries: surface anisotropy density, DMI density, spin pumping, proximity moment, exchange bias vector, spin Hall angle, field-like torque ratio. These are composed with the bulk material via thickness to yield effective parameters.
-
-### Thickness scaling
-
-Interface effects scale inversely with film thickness:
+### 3.1 Design-axes (comma-separated lists)
 
 ```
-K_u_eff     = K_u_bulk  + K_u_surface / t
-α_eff       = α_bulk    + α_pumping          (additive, not thickness-scaled)
-D_DMI_eff   = D_DMI_surface                  (MuMax3 convention, already effective)
-τ_DL(J_c)   = ℏ·θ_SH·|J_c| / (2·e·Ms·t)      (1/t scaling for SOT)
+--materials M1,M2,…              (default fgt-bulk,fgt-effective)
+--substrates S1,S2,…             (default vacuum,pt,wte2,yig)
+--thicknesses T1,T2,…            in nm (default 0.7,2.1)
+--bz-values B1,B2,…              in T  (default 0)
+--jx-values J1,J2,…              in A/m² (default 0)
 ```
 
-A 0.7 nm monolayer amplifies surface anisotropy ~10× relative to a 7 nm flake. The effect on SOT is similar: thin films respond more strongly to a given current density.
+Or pin a stack and sweep other axes:
+
+```
+--stack-spec "MAT1:T_nm,MAT2:T_nm,..."
+--stack-interlayer-a F1,F2,…
+--stack-spacing T1,T2,…  (nm)
+```
+
+### 3.2 Geometry / protocol
+
+```
+--nx / --ny N            grid (default 32)
+--cell-size F            cell size [nm] (default 2.5)
+--dt-ps F                timestep [ps] (default 0.01)
+                         WARNING: legacy default was 0.1 which is unstable
+                         for fgt-bulk; corrected to 0.01.
+--relax-steps N          equilibration steps (default 5000)
+--pulse F                transverse Bx pulse amplitude [T] (default 1.0)
+--pulse-steps N          pulse duration [steps] (default 100)
+--sample-interval N      steps between probe samples (default 20)
+--num-samples N          samples after pulse (default 1024)
+```
+
+### 3.3 Pump-probe sequencer (P4)
+
+```
+--pump-probe-mode                       enable pump-probe protocol
+--pump-t-center PS                      pump centre time [ps] (default 200)
+--pump-fwhm FS / --probe-fwhm FS        temporal FWHM [fs]   (default 100)
+--pump-peak T / --probe-peak T          IFE peak field [T]    (default 0.5 / 0.1)
+--pump-fluence MJ / --probe-fluence MJ  absorbed fluence [mJ/cm²] (engages M3TM)
+--pump-reflectivity F / --probe-reflectivity F   reflectivity 0..1
+--pump-probe-delay-range START END N    delay axis [ps]
+```
+
+### 3.4 Thermal (sweep-level)
+
+```
+--enable-thermal             attach ThermalConfig
+--enable-llb                 engage LLB (implies --enable-thermal)
+--thermal-preset KEY         ni | py | fgt | fgt-zhou | yig | cofeb
+--t-ambient K                ambient bath T (default 300)
+```
+
+CSV header (extended for pump-probe mode):
+
+```
+material,substrate,thickness_nm,n_layers,stack_desc,
+ms_eff,a_eff,k_u_eff,alpha_eff,d_dmi_eff,bz_T,jx_A_per_m2,
+freq_GHz,freq_width_GHz,q_factor,decay_time_ns,
+final_value,late_amplitude,dt_sample_ps,
+delay_ps,pulse_count,first_pulse_t_ps,total_fluence_mj_cm2,
+max_te_k,min_m_reduced
+```
 
 ---
 
-## 4. Running a single simulation (`magnonic-sim`)
+## 4. `magnonic-dashboard` — interactive viewer
 
-### Basic invocation
-
-```bash
-./target/release/magnonic-sim
-```
-
-Without arguments: 256×256 grid of fgt-bulk on vacuum, 10 000 steps. Prints the effective parameter decomposition to stderr and a CSV time series to stdout.
-
-### Key options
-
-```
-Design choices:
-  --material NAME        (default fgt-bulk)
-  --substrate NAME       (default vacuum)
-  --thickness NM         (default 0.7)
-  --cell-size NM         (default 2.5)
-  --nx N / --ny N        (default 256)
-
-Conditions:
-  --bx / --by / --bz F   External field components [T]
-  --jx / --jy / --jz F   Charge current density [A/m²]
-  --dt F                 Timestep [s] (default 1e-13)
-
-Initial state:
-  --init MODE            uniform | random | stripe | skyrmion
-  --skyrmion-radius F    Skyrmion seed radius [nm]
-
-Material overrides (post-lookup):
-  --alpha F              Bulk Gilbert damping
-  --a-ex F               Exchange stiffness [J/m]
-  --k-u F                Uniaxial anisotropy [J/m³]
-  --ms F                 Saturation magnetization [A/m]
-  --d-dmi F              DMI [J/m²]
-  --theta-sh F           Spin Hall angle
-
-Run control:
-  --steps N              Total steps (default 10 000)
-  --interval N           Readback interval (default 100)
-```
-
-### Output format
-
-stderr: parameter summary + progress notices.
-stdout: CSV with one line per readback:
-
-```
-step,time_ps,avg_mx,avg_my,avg_mz,min_norm,max_norm,probe_mz
-```
-
-| Column | Meaning |
-|--------|---------|
-| `step` | Cumulative integration step count |
-| `time_ps` | Simulation time in picoseconds |
-| `avg_mx/y/z` | Spatially averaged magnetization components |
-| `min_norm` / `max_norm` | Smallest/largest `|m|` across the grid (should stay at 1.0 ± f32 noise) |
-| `probe_mz` | Single-cell MTJ-style readout at grid center |
-
-### Recipe: free relaxation
+Requires the `gui` cargo feature and a desktop with X / Wayland:
 
 ```bash
-./target/release/magnonic-sim --nx 128 --ny 128 --steps 5000 --interval 500
+cargo build --release --bin magnonic-dashboard --features gui
+./target/release/magnonic-dashboard [options]
 ```
 
-A fresh uniform +z state (with 5° random perturbation) relaxing to the anisotropy easy axis. Used for sanity checks.
+### 4.1 CLI options
 
-### Recipe: current-driven dynamics
+All `magnonic-sim` flags work, plus:
 
-```bash
-./target/release/magnonic-sim \
-  --material fgt-effective --substrate pt \
-  --jx 5e13 \
-  --nx 32 --ny 32 --steps 10000 --dt 1e-15
+```
+--grid / -g                  grid layout: all 8 heatmap fields visible at once
+
+--pump-fwhm FS               pump pulse temporal FWHM [fs] (L key fires this)
+--pump-peak T                pump IFE peak field [T]
+--pump-dir x|y|z|-x|-y|-z    pump polarisation
+--pump-fluence MJ_CM2        absorbed fluence (engages M3TM source on L pulse)
+--pump-reflectivity F        reflectivity 0..1
+--pump-delay PS              fire at t_now + delay (default 1.0)
 ```
 
-Dramatic SOT-driven dynamics — watch `avg_mx` swing through large values. At these currents τ_DL approaches H_K and you see persistent limit-cycle oscillation (auto-oscillator regime, the basis for spin-torque nano-oscillators).
+### 4.2 Heatmap fields (cycle with `V`)
 
-### Recipe: skyrmion stability test
+| Field | Meaning | Colormap | Range |
+|---|---|---|---|
+| `Mz` | out-of-plane component | diverging blue-white-red | symmetric auto |
+| `Mx` | in-plane x | diverging | symmetric auto |
+| `My` | in-plane y | diverging | symmetric auto |
+| `\|m\|` | magnitude | viridis-ish | [0, 1] |
+| `K-space` | 2D-FFT of (m_x + i·m_y), fft-shifted | hot dB | [-60, 0] dB |
+| `Te` | electron temperature [K] | hot | auto, ≥ T_amb |
+| `Tp` | phonon temperature [K] | hot | auto, ≥ T_amb |
+| `m_red` | M3TM reduced magnetisation | viridis-ish | [0, 1] |
 
-```bash
-./target/release/magnonic-sim \
-  --material fgt-effective --substrate wte2 \
-  --init skyrmion \
-  --nx 128 --ny 128 --steps 20000 --interval 2000
-```
+Thermal fields render dim grey when `--enable-thermal` is off. K-space
+view always works (uses only the in-plane magnetisation).
 
-Seeds a Néel skyrmion, watches its evolution. `avg_mz` near 0.56 sustained over thousands of steps = skyrmion stable. `avg_mz` climbing to +1 = skyrmion collapsing.
-
----
-
-## 5. Interactive dashboard (`magnonic-dashboard`)
-
-Requires `--features gui`. Opens a window with the magnetization heatmap live-animated on top of a time-series plot.
-
-### Launch
-
-```bash
-./target/release/magnonic-dashboard --nx 128 --ny 128
-```
-
-Accepts many of the same design flags as `magnonic-sim` (`--material`, `--substrate`, `--thickness`, `--alpha`, `--bz`, `--dt`, `--nx/ny`).
-
-### Window layout
-
-| Area | Content |
-|------|---------|
-| Top ~70% | Magnetization heatmap — one pixel per cell, colored by Mz. Blue = Mz=-1, white = Mz=0, red = Mz=+1 |
-| Thin middle bar | Color legend dots for the plot lines (red=avg Mz, blue=avg Mx, green=avg My, amber=probe Mz). Turns dark-orange during a pulse |
-| Bottom ~30% | Time series plot. Y axis: [-1, +1]. Horizontal lines at 0, ±0.5, ±1 for reference |
-
-The window title shows live stats: step, sim time, avg Mz, probe Mz, alpha, Bz, steps/sec.
-
-### Keyboard controls
+### 4.3 Keybindings
 
 | Key | Action |
-|-----|--------|
-| **Space** | Play / pause |
-| **P** | Fire transverse Bx pulse (excites precession) |
-| **← / →** | Adjust pulse strength (±0.5 T) |
-| **A / Z** | Increase / decrease Gilbert damping α (×1.5 per press) |
-| **B / N** | Increase / decrease external Bz (±0.1 T per press) |
-| **↑ / ↓** | Double / halve steps-per-frame (simulation speed) |
-| **R** | Reset to random magnetization |
-| **D** | Reset to stripe domains |
-| **U** | Reset to uniform +z |
-| **S** | Reset to Néel skyrmion seed |
-| **C** | Clear plot history |
-| **Esc** | Quit |
+|---|---|
+| `Space` | play / pause |
+| `V` | cycle heatmap field (single mode) / focus tile (grid mode) |
+| `↑` / `↓` | steps per frame ×2 / ÷2 |
+| `Esc` | quit |
+| | |
+| `P` | fire transverse Bx pulse with current pulse-strength |
+| `←` / `→` | pulse strength ∓ 0.5 T |
+| `L` | fire IFE laser pulse (uses `--pump-*` defaults) |
+| `X` | clear all queued pulses |
+| | |
+| `T` | toggle thermal M3TM on/off |
+| `G` | toggle LLB within thermal |
+| `I` | cycle thermal preset (fgt → fgt-zhou → ni → py → cofeb → yig) |
+| `[` / `]` | T_ambient ∓ 10 K |
+| | |
+| `A` / `Z` | α ×1.5 / ÷1.5 |
+| `B` / `N` | Bz ± 0.1 T |
+| | |
+| `R` | reset: random magnetisation |
+| `D` | reset: stripe domains (width 8) |
+| `U` | reset: uniform +z (5° cone) |
+| `S` | reset: Néel skyrmion seed (radius ≈ 1/6 grid size) |
+| `K` | reset: alternating ±z per layer (synthetic AFM) |
+| `1` / `2` / `3` / `4` | display layer (multilayer only) |
+| `C` | clear plot history |
 
-### Typical dashboard session
+### 4.4 Layout
 
-1. Launch with desired material/substrate
-2. Press **Space** to start
-3. Press **P** to pulse — watch the plot lines oscillate as precession damps
-4. Press **Z** several times to drop alpha below 0.001 — precession rings much longer
-5. Press **R** to randomize — watch spatial domains form in the heatmap as exchange coupling enforces order
-6. Press **S** then **P** to seed a skyrmion and drive it
+**Single mode** (default):
 
-The heatmap becomes visually interesting with non-uniform initial states or after a strong pulse destabilizes the uniform phase.
+```
+┌──────────────┬─────────────┐
+│              │   status    │
+│   heatmap    │   panel     │
+│   (active    │             │
+│    field)    │   t, step,  │
+│              │   integ,    │
+│              │   thermal,  │
+│              │   range,    │
+│              │   ctrls     │
+├──────────────┴─────────────┤
+│   label bar (legend)       │
+├────────────────────────────┤
+│   plot strip (mx,my,mz,    │
+│      probe_mz history)     │
+└────────────────────────────┘
+```
+
+**Grid mode** (`--grid`):
+
+```
+┌────────┬────────┬────────┬────────┬───────────┐
+│  Mz    │  Mx    │  My    │ |m|    │  status   │
+├────────┼────────┼────────┼────────┤  panel    │
+│  Te    │  Tp    │ m_red  │ |M(k)|²│           │
+├────────┴────────┴────────┴────────┤           │
+│   label bar                       │           │
+├───────────────────────────────────┤           │
+│   plot strip                      │           │
+└────────────────────────────────────────────────┘
+```
+
+Window dims scale with `nx, ny`. Thermal tiles render dim grey when
+thermal is off (so the layout stays consistent).
 
 ---
 
-## 6. Parametric sweeps (`magnonic-sweep`)
+## 5. Material catalogue
 
-This is where the parametric-explorer framing pays off: iterate over design choices, produce CSV, analyze with pandas/Julia/spreadsheet.
+### 5.1 Bulk materials (`material.rs`, `--material` flag)
 
-### Per-design-point protocol
+| Key | Ms (A/m) | A (J/m) | K_u (J/m³) | α | T_c (K) | Notes |
+|---|---|---|---|---|---|---|
+| `fgt-bulk` (default) | 3.76·10⁵ | 9.5·10⁻¹² | 1.46·10⁶ | 0.001 | 220 | Leon-Brito 2016 single crystal |
+| `fgt-effective` | 3.76·10⁵ | 1.4·10⁻¹² | 4·10⁵ | 0.01 | 220 | Garland 2026 effective |
+| `fga-te2-bulk` | 5.5·10⁵ | 2·10⁻¹² | 3·10⁵ | 0.005 | 370 | Fe₃GaTe₂ (50% uncertainty) |
+| `cri3-bulk` | 1.4·10⁵ | 0.75·10⁻¹² | 3·10⁵ | 0.001 | 45 | Ising-like 2D, cryogenic |
+| `cofeb-bulk` | 1.2·10⁶ | 1.5·10⁻¹¹ | 4.5·10⁵ | 0.006 | 1100 | Thin-film MTJ workhorse |
+| `yig-bulk` | 1.4·10⁵ | 3.65·10⁻¹² | 0 | 3·10⁻⁵ | 560 | Ferrimagnet, ultra-low damping |
+| `permalloy-bulk` (`py`) | 8·10⁵ | 1.3·10⁻¹¹ | 0 | 0.008 | 870 | Ni₈₀Fe₂₀ |
 
-1. Construct SimConfig from (bulk, substrate, thickness, conditions)
-2. Relax system for N_relax steps (default 5 000)
-3. Apply transverse Bx pulse for N_pulse steps (default 100 = 10 ps at dt=1e-13)
-4. Turn pulse off; sample avg_mx every M steps (default 20) for N_sample samples (default 1 024)
-5. FFT the samples → dominant frequency (GHz)
-6. Envelope fit → decay time constant (ns)
-7. Q-factor = π · f · τ
+### 5.2 Substrates (`substrate.rs`, `--substrate` flag)
 
-### Minimal sweep
+| Key | Description |
+|---|---|
+| `vacuum` (default) | inert, no contributions |
+| `pt` | Pt with strong SOT (θ_SH ~ 0.1) and proximity effect |
+| `pd` | Pd, milder SOT |
+| `ta` | Ta, opposite-sign θ_SH |
+| `wte2` | WTe₂, exotic Berry-phase-derived torques |
+| `yig` | YIG underlayer for spin-pumping into magnonic substrate |
+| `mgo` | MgO insulator with K_u_surface contribution |
+| `irmn` | IrMn antiferromagnet, exchange-bias provider |
+
+`--list-substrates` prints the full numeric set.
+
+### 5.3 Thermal presets (`material_thermal.rs`, `--thermal-preset`)
+
+| Key | T_c (K) | a_sf | g_ep (W/m³K) | Source |
+|---|---|---|---|---|
+| `ni` | 627 | 0.185 | 8·10¹⁷ | Koopmans 2010 verified |
+| `py` (= `permalloy`) | 870 | 0.08 | 1·10¹⁸ | Battiato 2010 |
+| `fgt` (= `fgt-ni-surrogate`) | 220 | 0.185 | 5·10¹⁷ | Ni surrogate; uncalibrated for FGT |
+| `fgt-zhou` (= `fgt-calibrated`) | 210 | 0.185 | 5·10¹⁷ | Zhou 2025 morphology fit, ADR-006 |
+| `yig` (= `yig-inert`) | 560 | 0 | 0 | Insulator; no M3TM dynamics |
+| `cofeb` | 1100 | 0.15 | 1.1·10¹⁸ | Sato 2018 |
+
+The `fgt-zhou` preset additionally sets `tau_long_base = 1.0 fs`,
+`tau_fast_base = 0.3 fs`, `g_sub_phonon = 3·10¹⁷`,
+`optical_skin_depth_m = 18 nm`. See [`calibration.md`](calibration.md)
+for the procedure that derived these values.
+
+---
+
+## 6. Common workflows
+
+### 6.1 Reproduce the LLG bit-stable baseline
+
+```bash
+./target/release/magnonic-sim --steps 2000 --interval 10 > new_baseline.csv
+diff <(cut -d, -f6,7 new_baseline.csv) <(cut -d, -f6,7 reference_baseline.csv)
+# (diff should be empty on the min_norm/max_norm columns)
+```
+
+### 6.2 Run the canonical benchmarks
+
+```bash
+./target/release/magnonic-sim --benchmark beaurepaire-ni --steps 10000
+./target/release/magnonic-sim --benchmark mumag-sp4-proxy
+```
+
+### 6.3 Reproduce the Zhou calibration
+
+```bash
+cargo run --release --example test_zhou_fgt_calibrate
+```
+
+(81 trials, ≈13 minutes on RTX 4060.)
+
+### 6.4 Pump-probe sweep with thermal active
 
 ```bash
 ./target/release/magnonic-sweep \
-  --materials fgt-bulk \
-  --substrates vacuum,pt,wte2,yig \
-  --thicknesses 0.7,2.1 \
-  --output sweep.csv
+    --pump-probe-mode \
+    --pump-probe-delay-range 0.5 10 5 \
+    --pump-peak 0.0 --pump-fluence 0.24 --pump-reflectivity 0.5 \
+    --enable-thermal --enable-llb --thermal-preset fgt-zhou --t-ambient 210 \
+    --materials fgt-bulk --substrates vacuum --thicknesses 0.5 \
+    --bz-values 1 --jx-values 0 \
+    --nx 1 --ny 1 --cell-size 20 --dt-ps 0.005 \
+    --relax-steps 800 --num-samples 256 --sample-interval 5 \
+    -o /tmp/zhou_sweep.csv
 ```
 
-8 design points (1 × 4 × 2 × 1 × 1). Runtime ~10 seconds.
-
-### Full 5D sweep
+### 6.5 Interactive exploration
 
 ```bash
-./target/release/magnonic-sweep \
-  --materials fgt-bulk,fgt-effective,cofeb,permalloy \
-  --substrates vacuum,sio2,hbn,pt,wte2,yig,irmn \
-  --thicknesses 0.7,2.1,7.0 \
-  --bz-values 0.0,0.5 \
-  --jx-values 0,1e12,5e12 \
-  --nx 32 --ny 32 \
-  --num-samples 512 \
-  --output full-sweep.csv
-```
-
-504 design points. Runtime ~8 minutes on RTX 4060.
-
-### All sweep flags
-
-```
-Design axes (comma-separated):
-  --materials M1,M2,...       Bulk material names
-  --substrates S1,S2,...      Substrate names
-  --thicknesses T1,T2,...     Thicknesses [nm]
-  --bz-values B1,B2,...       External Bz [T]
-  --jx-values J1,J2,...       Current density Jx [A/m²]
-
-Geometry:
-  --nx N / --ny N             Grid size (default 32)
-  --cell-size F               Cell size [nm] (default 2.5)
-  --dt-ps F                   Timestep [ps] (default 0.1)
-
-Measurement protocol:
-  --relax-steps N             Pre-pulse equilibration (default 5000)
-  --pulse F                   Transverse Bx pulse amplitude [T] (default 1.0)
-  --pulse-steps N             Pulse duration in steps (default 100)
-  --sample-interval N         Steps between probe samples (default 20)
-  --num-samples N             Samples collected after pulse (default 1024)
-
-Output:
-  --output / -o PATH          CSV file (default sweep.csv)
-```
-
-### CSV columns
-
-```
-material, substrate, thickness_nm,
-ms_eff, a_eff, k_u_eff, alpha_eff, d_dmi_eff,   ← effective params (what the GPU sees)
-bz_T, jx_A_per_m2,                               ← design conditions
-freq_GHz, freq_width_GHz,                        ← dominant precession freq + FWHM
-q_factor, decay_time_ns,                         ← clock quality metrics
-final_value, late_amplitude,                     ← steady-state diagnostics
-dt_sample_ps                                      ← sampling interval for reference
-```
-
-### Quick analysis in Python
-
-```python
-import pandas as pd
-df = pd.read_csv("sweep.csv")
-
-# Top-10 designs by Q-factor
-df[df.q_factor != float("inf")].nlargest(10, "q_factor")[
-    ["material", "substrate", "thickness_nm", "freq_GHz", "q_factor", "decay_time_ns"]
-]
-
-# Material × substrate Q heatmap at fixed thickness
-pivot = df[df.thickness_nm == 0.7].pivot_table(
-    index="material", columns="substrate", values="q_factor"
-)
-pivot.style.background_gradient(cmap="viridis")
-```
-
-### Quick analysis in the shell
-
-```bash
-# Q > 100 designs
-awk -F, 'NR==1 || ($13 != "inf" && $13+0 > 100)' sweep.csv | column -t -s,
-
-# Best Q for each material
-awk -F, 'NR > 1 {
-  key = $1
-  if ($13 != "inf" && $13+0 > best[key]) { best[key] = $13+0; line[key] = $0 }
-} END { for (k in line) print line[k] }' sweep.csv | column -t -s,
+./target/release/magnonic-dashboard --grid --nx 128 --ny 128 \
+    --pump-peak 1.0 --pump-fluence 0.5 --pump-fwhm 100
+# Inside: Space, then L (fires the configured laser pulse),
+# then T (engages thermal), then V (cycles focus tile in grid mode).
 ```
 
 ---
 
-## 7. Interpreting output
+## 7. Run regression / acceptance tests
 
-### The effective parameter summary
+All tests are deterministic-or-better.
 
-Every run of `magnonic-sim` or `magnonic-dashboard` starts by printing the decomposition to stderr:
+```bash
+cargo test --release --lib
 
+# Acceptance probes — each is a self-checking example.
+cargo run --release --example test_m3tm_gpu_vs_host    # P3a gate
+cargo run --release --example test_sp4_proxy           # P3c gate
+cargo run --release --example test_llb_reduces_to_llg  # P3b gate
+cargo run --release --example test_llb_ni_demag        # P3 morphology smoke
+cargo run --release --example test_pump_probe          # P4 gate
+cargo run --release --example test_llb_two_stage       # F2 gate
+cargo run --release --example test_optical_skin_depth  # F3 gate
+cargo run --release --example test_beaurepaire_ni      # energy-balance gate
+cargo run --release --example test_zhou_fgt            # Zhou feasibility
+cargo run --release --example test_zhou_fgt_calibrate  # full Zhou refit (long)
 ```
-Effective params (from fgt-bulk bulk + pt substrate @ t=0.70nm):
-  Ms_eff    = 3.810e5 = bulk 3.760e5 + prox 5.000e3 [A/m]
-  A_eff     = 9.500e-12 [J/m]
-  K_u_eff   = 3.317e6 = bulk 1.460e6 + surf/t 1.857e6 [J/m³]
-  α_eff     = 0.00700 = bulk 0.00100 + pump 0.00600
-  D_DMI_eff = 1.000e-3 J/m² [active]
-  θ_SH      = 0.0700, τ_FL/τ_DL = 0.150 [active]
-Prefactors: B_exch=7.979 T, B_anis=17.413 T
-```
-
-Read this carefully — it tells you exactly what physics is active for this run. Interface-dominated K_u, spin-pumping-enhanced damping, nonzero DMI, and SOT-capable substrate all show up here. Anything labeled `[active]` is being computed in the GPU kernel; anything missing is inactive (zero contribution).
-
-### |m| preservation
-
-The CSV's `min_norm` and `max_norm` columns should stay within ~1e-7 of unity for the entire run. If you see drift beyond that, either:
-- dt is too large for the field magnitudes involved (reduce `--dt`)
-- There's a bug — report it
-
-Typical healthy range: min_norm ≈ 0.99999988, max_norm ≈ 1.00000012 (f32 rounding).
-
-### Sweep metrics
-
-| Metric | What it means | Typical range for FGT-based designs |
-|--------|---------------|-------------------------------------|
-| `freq_GHz` | Dominant precession frequency | 5–250 GHz depending on B_anis |
-| `freq_width_GHz` | FWHM of the spectral peak | Narrower = more coherent |
-| `q_factor` | π · f · τ_decay | Higher = better clock. Real devices target > 10³ |
-| `decay_time_ns` | Amplitude e-fold time of free precession | 0.1 ns (lossy) to 100+ ns (clean) |
-| `final_value` | Mean of last 10% of samples | ≈0 after damped precession; nonzero = persistent tilt |
-| `late_amplitude` | Peak-to-peak swing in the second half | Tiny = damped; large = persistent oscillation |
-
-`q_factor = inf` or `decay_time = inf` means the sweep protocol couldn't detect decay within the sample window — usually because damping is very low (α ≪ 0.001) and the window is short. Run longer (`--num-samples 2048`) to resolve.
 
 ---
 
-## 8. Common workflows
+## 8. Where to read next
 
-### Workflow A: single-design exploration
-
-You have one heterostructure in mind (say fgt-bulk on Pt at 1 nm). Want to understand its dynamics.
-
-```bash
-# 1. Inspect effective parameters
-./target/release/magnonic-sim --material fgt-bulk --substrate pt --thickness 1.0 \
-  --nx 16 --ny 16 --steps 1 2>&1 | head -20
-
-# 2. Interactive visual exploration
-./target/release/magnonic-dashboard --material fgt-bulk --substrate pt --thickness 1.0 \
-  --nx 128 --ny 128
-
-# 3. Quantitative time-series
-./target/release/magnonic-sim --material fgt-bulk --substrate pt --thickness 1.0 \
-  --nx 64 --ny 64 --steps 20000 --interval 200 > single-run.csv
-```
-
-### Workflow B: thickness scaling study
-
-How does Q-factor change as I vary film thickness for a fixed material × substrate?
-
-```bash
-./target/release/magnonic-sweep \
-  --materials fgt-bulk \
-  --substrates pt \
-  --thicknesses 0.35,0.7,1.4,2.1,3.5,7.0,14.0 \
-  --output pt-thickness-study.csv
-```
-
-7 rows, load in pandas, plot `q_factor vs thickness_nm`.
-
-### Workflow C: material × substrate phase diagram
-
-Which combinations sustain clock behavior at all?
-
-```bash
-./target/release/magnonic-sweep \
-  --materials fgt-bulk,fgt-effective,cofeb,permalloy,cri3 \
-  --substrates vacuum,hbn,pt,wte2,yig \
-  --thicknesses 1.0 \
-  --output phase-diagram.csv
-```
-
-25 rows. Pivot into a material × substrate matrix of Q-factors. Visual heatmap answers "which cells are viable."
-
-### Workflow D: SOT drive threshold
-
-At what current density does the magnetization start oscillating persistently?
-
-```bash
-./target/release/magnonic-sweep \
-  --materials fgt-effective \
-  --substrates pt \
-  --thicknesses 0.7 \
-  --jx-values 0,1e11,5e11,1e12,5e12,1e13,5e13 \
-  --pulse 0.0 --pulse-steps 0 \
-  --num-samples 2048 \
-  --output sot-threshold.csv
-```
-
-Watch `late_amplitude` climb as J_c increases — that's the anti-damping SOT sustaining oscillation.
-
-### Workflow E: skyrmion stability regime
-
-For what (K_u, D) combinations are skyrmions metastable?
-
-This is not yet directly supported by the sweep (which always does uniform-start + pulse). For now, use single-run skyrmion seeding:
-
-```bash
-for K in 2e5 5e5 1e6 3e6; do
-  for D in 0.5e-3 1e-3 2e-3; do
-    ./target/release/magnonic-sim --init skyrmion \
-      --material fgt-effective --substrate wte2 \
-      --k-u $K --d-dmi $D \
-      --nx 128 --ny 128 --steps 50000 --interval 5000 \
-      --dt 1e-13 \
-      2>/dev/null | tail -1
-  done
-done
-```
-
-Last line's `avg_mz` column tells you whether the skyrmion survived (~0.5-0.7) or collapsed (~1.0).
-
----
-
-## 9. Extending the system
-
-### Adding a new bulk material
-
-Edit `src/material.rs`:
-
-1. Add a new constructor:
-   ```rust
-   pub fn cr_te2_bulk() -> Self {
-       Self {
-           name: "crte2-bulk",
-           ms_bulk: 3.2e5,
-           a_ex_bulk: 1.5e-12,
-           k_u_bulk: 3.0e5,
-           alpha_bulk: 0.01,
-           gamma: 1.7595e11,
-           tc_bulk: 300.0,
-           notes: "CrTe2 — above-room-T 2D ferromagnet.",
-       }
-   }
-   ```
-2. Add to `lookup()`:
-   ```rust
-   "crte2" | "crte2-bulk" => Some(Self::cr_te2_bulk()),
-   ```
-3. Add to `list_all()`.
-
-No other changes needed. `magnonic-sim --material crte2` now works.
-
-### Adding a new substrate
-
-Edit `src/substrate.rs` the same way. Fields accepted:
-- `k_u_surface [J/m²]`, `d_dmi_surface [J/m²]`, `alpha_pumping`, `delta_ms_proximity [A/m]`, `b_exchange_bias [T; 3]`, `spin_hall_angle`, `tau_fl_ratio`
-
-### Adding a new initial condition
-
-Edit `src/gpu.rs` — add a `reset_*()` method alongside the existing ones (`reset_uniform_z`, `reset_random`, `reset_stripe_domains`, `reset_skyrmion_seed`). The method writes initial magnetization to `self.mag_buf` via `queue.write_buffer`.
-
-Expose via the CLI in `src/main.rs`'s `--init` handler.
-
-### Adding new physics
-
-The shader `src/shaders/llg.wgsl` has a clean field-sum structure:
-
-```wgsl
-let b_eff = exchange_from_mag(idx) + anisotropy_field(m)
-          + zeeman_field() + exchange_bias_field() + dmi_from_mag(idx);
-```
-
-Add a new `my_field(m, idx)` function, append it to this sum in both `field_torque_phase0` and `field_torque_phase1`. Supporting uniform parameters go in the `Params` struct (matching Rust `GpuParams`). See `docs/plan.md` §3 for the byte-layout protocol.
-
----
-
-## 10. Troubleshooting
-
-### `No GPU adapter` on launch
-
-The wgpu backend couldn't find a compatible device. Options:
-
-- Linux: install Vulkan drivers (`vulkan-tools` package, `vulkaninfo` should succeed)
-- Verify GPU is not exclusively assigned to another process
-- Try `WGPU_BACKEND=gl` as a fallback (slower, but works without Vulkan)
-
-### Build fails on `winit 0.30.13`
-
-This is an old issue that Phase 1 avoided by using `minifb` instead of winit+egui. If you hit it while adding dependencies, pin or replace the offending crate.
-
-### |m| drifts above 1e-5
-
-Reduce `--dt`. If problem persists at dt=1e-15, it may be a field-magnitude issue (very large τ_DL from high current). Reduce current or increase damping.
-
-### Sweep is slow
-
-Per-point cost is dominated by:
-1. Pipeline creation on solver instantiation (~200 ms)
-2. GPU compute (scales with `nx*ny * (relax+pulse+sample*interval)` steps)
-3. Readback latency (scales with num_samples)
-
-To speed up:
-- Smaller grids (`--nx 16 --ny 16` gives ~8× speedup at same step count)
-- Fewer samples (`--num-samples 256` is usually enough for FFT peak detection)
-- Fewer relax steps (`--relax-steps 2000`) if you don't need full equilibrium
-
-### Frequency values near FFT bin resolution
-
-If sweep reports `freq_GHz` at a small integer multiple of a base frequency, the FFT may be resolving only the lowest bin (the true precession is below the sample window's resolution). Increase `--num-samples` or `--sample-interval`.
-
----
-
-## 11. Where to look next
-
-- `docs/plan.md` — the phased implementation plan with the full physics decomposition rules, byte layout, and references
-- `docs/viability-report.md` — SOTA audit, FGT literature review, SOT/DMI/material parameter assessment
-- `src/shaders/llg.wgsl` — the LLG kernel itself with inline derivations for each field term
-- `src/effective.rs` — how `(BulkMaterial + Substrate + Geometry) → EffectiveParams` composition works
-- `corp/registry/entities/project-magnonic-clock-sim.yaml` — project registry record
-
-## 12. One-line recipes cheat sheet
-
-```bash
-# Default run, just watch it relax
-./target/release/magnonic-sim --nx 64 --ny 64 --steps 5000 --interval 500
-
-# See all materials
-./target/release/magnonic-sim --list-materials
-
-# See all substrates
-./target/release/magnonic-sim --list-substrates
-
-# FGT on Pt heterostructure, full summary
-./target/release/magnonic-sim --material fgt-bulk --substrate pt --thickness 1.0 --steps 1 2>&1 | head -20
-
-# Interactive — play with parameters live
-./target/release/magnonic-dashboard --material fgt-bulk --substrate wte2
-
-# Skyrmion stability check
-./target/release/magnonic-sim --init skyrmion --material fgt-effective --substrate wte2 --nx 128 --ny 128 --steps 20000 --interval 2000 > skx.csv
-
-# Quick 16-point sweep (~10s)
-./target/release/magnonic-sweep --materials fgt-bulk --substrates vacuum,pt,wte2,yig --thicknesses 0.7,2.1 -o sweep.csv
-
-# Big parameter sweep (~8min)
-./target/release/magnonic-sweep --materials fgt-bulk,fgt-effective,cofeb,permalloy --substrates vacuum,sio2,hbn,pt,wte2,yig,irmn --thicknesses 0.7,2.1,7.0 --bz-values 0,0.5 -o full.csv
-```
+- [`physics.md`](physics.md) for what's computed and why.
+- [`equations.md`](equations.md) for every formula.
+- [`calibration.md`](calibration.md) for fitting new materials.
+- [`references.md`](references.md) for citations.
