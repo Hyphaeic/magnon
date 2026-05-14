@@ -10,7 +10,7 @@
   
   **A GPU-accelerated micromagnetic and ultrafast-thermal simulator built in Rust, optimized for 2D van-der-Waals ferromagnets like Fe₃GeTe₂. It supports standard LLG and opt-in thermal LLB pathways, complete with optical driving and a real-time visualization dashboard**
   
-  [Paper](https://arxiv.org/abs/2506.09499) · [Documentation](docs) [Examples](examples)
+  [Paper](https://arxiv.org/abs/2506.09499) · [Documentation](docs) · [Examples](examples)
   
   [HPL License](https://github.com/hyphaeic/hpl) · [Local License](LICENSE)
 
