@@ -1,17 +1,40 @@
-# Magnonic Clock Simulator
+<div align="center">
+  <img src="https://src.hyphaeic.com/website/img/logo.png" alt="Hyphaeic" width="80"/>
+  
+  # MAGNON
+  
+  [![Hyphaeic](https://img.shields.io/badge/HYPHAEIC-research-41efa4?style=flat-square&labelColor=1a1a1a)](https://github.com/Hyphaeic)
+  [![arXiv](https://img.shields.io/badge/arXiv-2506.09499-b31b1b?style=flat-square&labelColor=1a1a1a)](https://arxiv.org/abs/2506.09499)
+  [![Tests](https://img.shields.io/badge/tests-220%2B_passing-41efa4?style=flat-square&labelColor=1a1a1a)](https://github.com/Hyphaeic/stok-core)
+  [![License](https://img.shields.io/badge/license-HPL-41efa4?style=flat-square&labelColor=1a1a1a)](https://github.com/hyphaeic/hpl)
+  
+  **A GPU-accelerated micromagnetic and ultrafast-thermal simulator built in Rust, optimized for 2D van-der-Waals ferromagnets like Fe₃GeTe₂. It supports standard LLG and opt-in thermal LLB pathways, complete with optical driving and a real-time visualization dashboard**
+  
+  Documentation: `cargo doc --open` · [Paper](https://arxiv.org/abs/2506.09499) · [Examples](examples)
+  
+  [HPL License](https://github.com/hyphaeic/hpl) · [Local License](LICENSE)
 
-A GPU-accelerated micromagnetic + ultrafast-thermal simulator targeting
+<<<<<<< HEAD
+</div>
+
+---
+
+=======
+[![Paper](https://img.shields.io/badge/arXiv-2506.09499-b31b1b.svg)](https://arxiv.org/abs/2506.09499)
+[![Tests](https://img.shields.io/badge/tests-280%2B%20passing-success)](https://github.com/Hyphaeic/stok-core)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+**A GPU-accelerated micromagnetic + ultrafast-thermal simulator targeting
 nanostructured 2D van-der-Waals ferromagnets (Fe₃GeTe₂ in particular).
 Implements the Landau–Lifshitz–Gilbert (LLG) equation as a default path
 and the Landau–Lifshitz–Bloch (LLB) equation with a Koopmans M3TM
 thermal-bath coupling as an opt-in path. Adds a phonon→substrate sink
 (F2-prep), field-dependent equilibrium magnetisation `m_e(T, B)` (F1),
 two-timescale longitudinal LLB with a proxy variable (F2), and
-Beer-Lambert per-layer optical absorption (F3).
+Beer-Lambert per-layer optical absorption (F3).**
 
-Calibrated against Zhou et al. *Natl. Sci. Rev.* 12, nwaf185 (2025) at
-the literal experimental operating point (T = T_c = 210 K, B = 1 T,
-F = 0.24 mJ/cm²) with loss 0.0002.
+> Calibrated against Zhou et al. *Natl. Sci. Rev.* 12, nwaf185 (2025) at the literal experimental operating point (T = T_c = 210 K, B = 1 T,
+F = 0.24 mJ/cm²) with loss 0.0002.*
 
 ---
 
