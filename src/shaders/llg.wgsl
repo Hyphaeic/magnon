@@ -25,7 +25,7 @@ struct Params {
     cell_count: u32,
 
     dt: f32,
-    gamma: f32,
+    gamma: f32,       // legacy first-layer gamma; per-layer dynamics use layer_gammas
     stab_coeff: f32,
     cell_size_m: f32,  // in-plane cell size [m]; used in Phase P2 for pulse spatial profile
 
@@ -77,6 +77,7 @@ struct Params {
     layer_thermal_b_max: vec4<f32>,     // Tesla — F1 B-axis ceiling per layer
     layer_thermal_tau_fast: vec4<f32>,  // F2 fast-stage relaxation base time [s]
     layer_optical_atten: vec4<f32>,     // F3 per-layer attenuation factor [1/m]
+    layer_gammas: vec4<f32>,            // per-layer gyromagnetic ratio [rad/(s·T)]
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -287,7 +288,8 @@ fn dmi_from_pred(idx: u32) -> vec3<f32> {
 fn llg_torque(m: vec3<f32>, b_eff: vec3<f32>, iz: u32) -> vec3<f32> {
     let alpha = params.layer_alphas[iz];
     let a2 = alpha * alpha;
-    let gp = params.gamma / (1.0 + a2);
+    let gamma = params.layer_gammas[iz];
+    let gp = gamma / (1.0 + a2);
 
     let mxb = cross(m, b_eff);
     let mxmxb = cross(m, mxb);
@@ -298,8 +300,8 @@ fn llg_torque(m: vec3<f32>, b_eff: vec3<f32>, iz: u32) -> vec3<f32> {
     let sigma = params.layer_sigmas[iz].xyz;
     let mxs = cross(m, sigma);
     let mxmxs = cross(m, mxs);
-    dmdt += -params.gamma * (params.layer_sot_tau_dls[iz] * mxmxs
-                            + params.layer_sot_tau_fls[iz] * mxs);
+    dmdt += -gamma * (params.layer_sot_tau_dls[iz] * mxmxs
+                     + params.layer_sot_tau_fls[iz] * mxs);
 
     return dmdt;
 }
@@ -550,7 +552,8 @@ fn llb_torque(idx: u32, m: vec3<f32>, b_eff: vec3<f32>, iz: u32, t_s: f32) -> ve
 
     // ─ Transverse (LLG) part with temperature-dependent α_⊥ ─
     let a_perp = max(alpha_perp(iz, t_s), 0.0);
-    let gp = params.gamma / (1.0 + a_perp * a_perp);
+    let gamma = params.layer_gammas[iz];
+    let gp = gamma / (1.0 + a_perp * a_perp);
     let mxb = cross(m, b_eff);
     let mxmxb = cross(m_hat, cross(m_hat, b_eff)) * m_mag;  // keep |m| prefactor
     var dmdt = -gp * (mxb + a_perp * mxmxb);
@@ -571,8 +574,8 @@ fn llb_torque(idx: u32, m: vec3<f32>, b_eff: vec3<f32>, iz: u32, t_s: f32) -> ve
     let sigma = params.layer_sigmas[iz].xyz;
     let mxs = cross(m, sigma);
     let mxmxs = cross(m_hat, cross(m_hat, sigma)) * m_mag;
-    dmdt = dmdt + -params.gamma * (params.layer_sot_tau_dls[iz] * mxmxs
-                                  + params.layer_sot_tau_fls[iz] * mxs);
+    dmdt = dmdt + -gamma * (params.layer_sot_tau_dls[iz] * mxmxs
+                           + params.layer_sot_tau_fls[iz] * mxs);
     return dmdt;
 }
 

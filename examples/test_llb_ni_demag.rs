@@ -25,7 +25,11 @@ fn main() {
     let mut cfg = SimConfig {
         stack,
         substrate: Substrate::vacuum(),
-        geometry: Geometry { nx: 1, ny: 1, cell_size: 20e-9 },
+        geometry: Geometry {
+            nx: 1,
+            ny: 1,
+            cell_size: 20e-9,
+        },
         dt: 1.0e-15,
         b_ext: [0.0, 0.0, 0.0],
         stab_coeff: 0.0,
@@ -36,8 +40,8 @@ fn main() {
         probe_idx: None,
         probe_layer: None,
     };
-    let pulse = parse_pulse_spec("t=300fs,fwhm=100fs,peak=0.0,dir=z,fluence=1.0,R=0.0")
-        .expect("pulse");
+    let pulse =
+        parse_pulse_spec("t=300fs,fwhm=100fs,peak=0.0,dir=z,fluence=1.0,R=0.0").expect("pulse");
     cfg.photonic.pulses.push(pulse);
     cfg.photonic.thermal = Some(ThermalConfig {
         t_ambient: 300.0,
@@ -69,11 +73,7 @@ fn main() {
         if step == 200 || step == 400 || step == 1000 || step == 5000 || step == 9999 {
             println!(
                 "step {:5} t={:.2} ps: T_e_max={:7.1}K  |m|_min={:.4}  m_reduced_min={:.4}",
-                step,
-                obs.time_ps,
-                obs.max_t_e,
-                obs.min_norm,
-                obs.min_m_reduced,
+                step, obs.time_ps, obs.max_t_e, obs.min_norm, obs.min_m_reduced,
             );
         }
     }
@@ -84,8 +84,15 @@ fn main() {
     );
 
     assert!(!any_nan, "NaN detected in LLB integrator");
-    assert!(t_e_peak > 400.0, "T_e never exceeded 400 K — pulse not driving M3TM");
-    assert!(m_floor < 0.95, "LLB did not demagnetize at all (floor = {})", m_floor);
+    assert!(
+        t_e_peak > 400.0,
+        "T_e never exceeded 400 K — pulse not driving M3TM"
+    );
+    assert!(
+        m_floor < 0.95,
+        "LLB did not demagnetize at all (floor = {})",
+        m_floor
+    );
     assert!(last_m > 0.5, "LLB did not recover — final |m| = {}", last_m);
     println!("PASS: LLB demag + recovery, no NaN.");
 }

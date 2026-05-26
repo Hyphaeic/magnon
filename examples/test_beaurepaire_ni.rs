@@ -25,7 +25,11 @@ fn main() {
     let mut cfg = SimConfig {
         stack,
         substrate: Substrate::vacuum(),
-        geometry: Geometry { nx: 1, ny: 1, cell_size: 20e-9 },
+        geometry: Geometry {
+            nx: 1,
+            ny: 1,
+            cell_size: 20e-9,
+        },
         dt: 1.0e-15,
         b_ext: [0.0, 0.0, 0.0],
         stab_coeff: 0.0,
@@ -36,8 +40,8 @@ fn main() {
         probe_idx: None,
         probe_layer: None,
     };
-    let pulse = parse_pulse_spec("t=300fs,fwhm=100fs,peak=0.0,dir=z,fluence=7.0,R=0.0")
-        .expect("pulse");
+    let pulse =
+        parse_pulse_spec("t=300fs,fwhm=100fs,peak=0.0,dir=z,fluence=7.0,R=0.0").expect("pulse");
     cfg.photonic.pulses.push(pulse.clone());
     cfg.photonic.thermal = Some(ThermalConfig {
         t_ambient: 300.0,
@@ -76,10 +80,14 @@ fn main() {
     }
 
     // Observables of interest.
-    let (m_min, m_min_idx) = trajectory_m.iter().enumerate().fold(
-        (1.0_f64, 0_usize),
-        |(v, i), (j, x)| if *x < v { (*x, j) } else { (v, i) },
-    );
+    let (m_min, m_min_idx) =
+        trajectory_m
+            .iter()
+            .enumerate()
+            .fold(
+                (1.0_f64, 0_usize),
+                |(v, i), (j, x)| if *x < v { (*x, j) } else { (v, i) },
+            );
     let m_at_500fs = trajectory_m[500.min(trajectory_m.len() - 1)];
     let t_e_final = *trajectory_te.last().unwrap();
     let t_p_final = *trajectory_tp.last().unwrap();
@@ -87,8 +95,13 @@ fn main() {
     // Recovery τ: exponential fit on the segment [m_min_idx .. end]; we
     // approximate by the e-folding step after m_min.
     let target = m_min + (1.0 - m_min) * (1.0 - (-1.0f64).exp());
-    let tau_idx = trajectory_m.iter().enumerate().skip(m_min_idx)
-        .find(|(_, v)| **v >= target).map(|(i, _)| i).unwrap_or(trajectory_m.len() - 1);
+    let tau_idx = trajectory_m
+        .iter()
+        .enumerate()
+        .skip(m_min_idx)
+        .find(|(_, v)| **v >= target)
+        .map(|(i, _)| i)
+        .unwrap_or(trajectory_m.len() - 1);
     let tau_ps = trajectory_ps[tau_idx] - trajectory_ps[m_min_idx];
 
     // Energy balance at end of run (t = 10 ps, pulse fully delivered).
@@ -107,12 +120,16 @@ fn main() {
     let total_accounted = delta_u + e_substrate;
     let balance_ratio = total_accounted / total_laser_input_per_cell;
 
-    println!(
-        "Beaurepaire Ni — 20 nm, 100 fs FWHM, 7 mJ/cm² absorbed, T_ambient=300K:"
-    );
-    for (label, i) in [("t=0.2 ps", 200), ("t=0.3 ps", 300), ("t=0.5 ps", 500),
-                        ("t=1.0 ps", 1000), ("t=2.0 ps", 2000), ("t=5.0 ps", 5000),
-                        ("t=10 ps", 9999)] {
+    println!("Beaurepaire Ni — 20 nm, 100 fs FWHM, 7 mJ/cm² absorbed, T_ambient=300K:");
+    for (label, i) in [
+        ("t=0.2 ps", 200),
+        ("t=0.3 ps", 300),
+        ("t=0.5 ps", 500),
+        ("t=1.0 ps", 1000),
+        ("t=2.0 ps", 2000),
+        ("t=5.0 ps", 5000),
+        ("t=10 ps", 9999),
+    ] {
         if i < trajectory_m.len() {
             println!(
                 "  {label}: |m| = {:.4}  T_e = {:7.1} K  T_p = {:6.1} K",
@@ -124,12 +141,19 @@ fn main() {
         "\n|m| floor = {:.4} at t = {:.3} ps",
         m_min, trajectory_ps[m_min_idx]
     );
-    println!("|m| at t = 500 fs     = {:.4}   (Beaurepaire target: 0.60 ± 0.05)", m_at_500fs);
-    println!("1/e recovery τ        = {:.3} ps from floor  (target: ~1 ps)", tau_ps);
     println!(
-        "\nEnergy balance:"
+        "|m| at t = 500 fs     = {:.4}   (Beaurepaire target: 0.60 ± 0.05)",
+        m_at_500fs
     );
-    println!("  laser input          = {:.3e} J/cell", total_laser_input_per_cell);
+    println!(
+        "1/e recovery τ        = {:.3} ps from floor  (target: ~1 ps)",
+        tau_ps
+    );
+    println!("\nEnergy balance:");
+    println!(
+        "  laser input          = {:.3e} J/cell",
+        total_laser_input_per_cell
+    );
     println!("  Δ(U_e + U_p) @ 10 ps = {:.3e} J/cell", delta_u);
     println!("  ∫ substrate outflow  = {:.3e} J/cell", e_substrate);
     println!("  total accounted      = {:.3e} J/cell", total_accounted);

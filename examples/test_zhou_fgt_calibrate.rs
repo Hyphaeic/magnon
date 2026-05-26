@@ -1,13 +1,10 @@
 //! Phase P5 — FGT parameter calibration against Zhou 2025 morphology.
 //!
-//! **Assumptions made explicit (see docs/zhou_fgt_calibration.md §Limits):**
+//! **Assumptions made explicit (see docs/calibration.md §Trust boundaries):**
 //!
-//! 1. Operating point shifted to T = 150 K (Zhou measured at T = T_c = 210 K).
-//!    Reason: our m_e(T) tables are the zero-field Brillouin / MFA solution.
-//!    At T = T_c the zero-field m_e = 0, so the pre-pulse state is ill-defined;
-//!    Zhou's 1 T field enhances m_e at T_c to a finite value but our tables
-//!    don't carry that field dependence. At T = 150 K (≈ 0.71·T_c) m_e = 0.85
-//!    and the field-induced correction is small (<5 %).
+//! 1. Operating point is Zhou's literal T = T_c = 210 K, B_z = 1 T,
+//!    F = 0.24 mJ/cm², 150 fs FWHM, 5 nm FGT case. This is now
+//!    well-defined because the F1 m_e tables include longitudinal field.
 //!
 //! 2. We fit the *morphology* of Zhou's curve, not the exact experimental
 //!    trace. Matched features:
@@ -18,19 +15,13 @@
 //!           target: 0.55 (partial recovery in the 22 ps window, consistent
 //!           with Zhou's slow-stage τ_2 ≈ 22 ps)
 //!
-//! 3. Our LLB ships with a phenomenological longitudinal relaxation —
-//!    single-timescale by construction. Zhou reports a two-stage decay
-//!    (τ_1 = 0.4 ps, τ_2 = 5.1–22.2 ps). A clean two-stage signature is NOT
-//!    reproducible with the current model regardless of parameters; we only
-//!    fit aggregate demag + recovery.
+//! 3. Our LLB ships with a phenomenological two-stage longitudinal
+//!    relaxation, not a full Atxitia susceptibility-derived LLB. We fit
+//!    aggregate demag + recovery morphology, not a full experimental trace.
 //!
-//! 4. Pump intensity in the absence of optical-skin-depth physics: we assume
-//!    uniform absorption across the 5 nm flake (`absorbed power density =
-//!    (1 − R) · F / thickness / (√(2π)·σ_t)`). Real experiments have an
-//!    exponential absorption profile; for a 5 nm flake with 400-nm optical
-//!    skin depth ≈ 15 nm this approximation is ~0.7× error in the deposited
-//!    energy — absorbed fluence is bounded, so we don't compensate in the
-//!    fit.
+//! 4. Pump absorption uses F3 Beer-Lambert attenuation with fixed
+//!    optical_skin_depth_m = 18 nm. Reflectivity is still a fit handle
+//!    because absorbed fluence at the film is uncertain.
 //!
 //! 5. **`a_sf` is inert under the LLB back-coupling path (P3c).** When LLB
 //!    owns |m| dynamics, the Koopmans dm/dt term is replaced by the LLB
@@ -42,10 +33,11 @@
 //!    implicitly. Calibration grid therefore uses `tau_long_base` instead.
 //!
 //! Calibration grid:
-//!   tau_long_base ∈ {0.1, 0.3, 1.0, 3.0, 10.0} fs
-//!   reflectivity  ∈ {0.10, 0.30, 0.50, 0.70, 0.85}
-//!   g_sub_phonon  ∈ {5e16, 1e17, 2e17, 5e17, 1e18}
-//! 125 trials — ≈2 min wall-clock on an RTX 4060.
+//!   tau_long_base ∈ {1.0, 3.0, 10.0} fs
+//!   tau_fast_base ∈ {0.1, 0.3, 1.0} fs
+//!   reflectivity  ∈ {0.30, 0.50, 0.70}
+//!   g_sub_phonon  ∈ {1e17, 3e17, 1e18}
+//! 81 trials.
 //!
 //! Output: prints top-5 (by L) and best fit, formatted for direct paste into
 //! a `fgt_calibrated()` preset. Loss function:
@@ -110,20 +102,30 @@ fn run_trial(tau_long: f64, tau_fast: f64, r: f32, g_sub: f64) -> TrialMetrics {
     preset.tau_fast_base = tau_fast;
     preset.g_sub_phonon = g_sub;
     preset.optical_skin_depth_m = SKIN_DEPTH_M;
-    let (m_e_table, chi_table) =
-        material_thermal::brillouin_tables_spin_half_2d(
-            preset.t_c, preset.llb_table_n, preset.llb_table_n_b, preset.b_max_t,
-        );
+    let (m_e_table, chi_table) = material_thermal::brillouin_tables_spin_half_2d(
+        preset.t_c,
+        preset.llb_table_n,
+        preset.llb_table_n_b,
+        preset.b_max_t,
+    );
     preset.m_e_table = m_e_table;
     preset.chi_par_table = chi_table;
 
-    let mut stack = Stack::monolayer(BulkMaterial::fgt_bulk(), FLAKE_THICKNESS_NM * 1e-9, [0.0, 0.0, 1.0]);
+    let mut stack = Stack::monolayer(
+        BulkMaterial::fgt_bulk(),
+        FLAKE_THICKNESS_NM * 1e-9,
+        [0.0, 0.0, 1.0],
+    );
     stack.layers[0].material.alpha_bulk = preset.alpha_0;
 
     let mut cfg = SimConfig {
         stack,
         substrate: Substrate::vacuum(),
-        geometry: Geometry { nx: 1, ny: 1, cell_size: 20e-9 },
+        geometry: Geometry {
+            nx: 1,
+            ny: 1,
+            cell_size: 20e-9,
+        },
         dt: 5.0e-15,
         b_ext: [0.0, 0.0, B_EXT_T],
         stab_coeff: 0.0,
@@ -139,7 +141,9 @@ fn run_trial(tau_long: f64, tau_fast: f64, r: f32, g_sub: f64) -> TrialMetrics {
         "t=4ps,fwhm={:.0}fs,peak=0.0,dir=z,fluence={:.4},R={:.3}",
         PULSE_FWHM_FS, FLUENCE_MJ_CM2, r
     );
-    cfg.photonic.pulses.push(parse_pulse_spec(&pulse_spec).unwrap());
+    cfg.photonic
+        .pulses
+        .push(parse_pulse_spec(&pulse_spec).unwrap());
     cfg.photonic.thermal = Some(ThermalConfig {
         t_ambient: T_AMBIENT_K,
         per_layer: vec![preset.clone()],
@@ -161,13 +165,18 @@ fn run_trial(tau_long: f64, tau_fast: f64, r: f32, g_sub: f64) -> TrialMetrics {
     }
 
     // Reference: just before the pulse peak (t = 3.5 ps). LLB has had 3.5 ps
-    // to relax from the |m| = 1 initial to ≈ m_e(150 K) = 0.85.
+    // to relax from the |m| = 1 initial toward m_e(210 K, 1 T).
     let i_ref = traj_ps.iter().position(|&t| t > 3.5).unwrap_or(0);
     let m_initial = traj_m[i_ref].max(1e-6);
-    let (m_floor, i_min) = traj_m.iter().enumerate().skip(i_ref).fold(
-        (m_initial, i_ref),
-        |(v, i), (j, x)| if *x < v { (*x, j) } else { (v, i) },
-    );
+    let (m_floor, i_min) =
+        traj_m
+            .iter()
+            .enumerate()
+            .skip(i_ref)
+            .fold(
+                (m_initial, i_ref),
+                |(v, i), (j, x)| if *x < v { (*x, j) } else { (v, i) },
+            );
     let i_22 = traj_ps
         .iter()
         .position(|&t| t > 4.0 + 22.0)
@@ -201,7 +210,10 @@ fn run_trial(tau_long: f64, tau_fast: f64, r: f32, g_sub: f64) -> TrialMetrics {
 
 fn main() {
     let n_trials = TAU_LONG_GRID.len() * TAU_FAST_GRID.len() * R_GRID.len() * G_SUB_GRID.len();
-    println!("=== FGT Zhou-morphology calibration (F1+F2+F3), grid search ({} trials) ===", n_trials);
+    println!(
+        "=== FGT Zhou-morphology calibration (F1+F2+F3), grid search ({} trials) ===",
+        n_trials
+    );
     println!(
         "Operating point: T = {} K, B_z = {} T, F = {} mJ/cm², FWHM = {} fs, t = {} nm FGT, δ = {} nm",
         T_AMBIENT_K, B_EXT_T, FLUENCE_MJ_CM2, PULSE_FWHM_FS, FLAKE_THICKNESS_NM, SKIN_DEPTH_M * 1e9,
@@ -239,7 +251,17 @@ fn main() {
     println!("Top 5 by loss (lower = closer to Zhou morphology):");
     println!(
         "  {:>7} {:>7} {:>5} {:>10} | {:>6} {:>6} | {:>6} {:>6} {:>6} {:>7} | {:>6}",
-        "τ_L[fs]", "τ_F[fs]", "R", "g_sub", "demag", "rec22", "m_ini", "m_min", "m_22", "t_min", "loss"
+        "τ_L[fs]",
+        "τ_F[fs]",
+        "R",
+        "g_sub",
+        "demag",
+        "rec22",
+        "m_ini",
+        "m_min",
+        "m_22",
+        "t_min",
+        "loss"
     );
     for m in results.iter().take(5) {
         println!(
@@ -259,7 +281,8 @@ fn main() {
     );
     println!(
         "Observed: demag = {:.1} % (target 79%),  recovery@22ps = {:.1} % (target 55%)",
-        best.demag_frac * 100.0, best.recovery_frac * 100.0,
+        best.demag_frac * 100.0,
+        best.recovery_frac * 100.0,
     );
 
     println!();
@@ -269,5 +292,8 @@ fn main() {
     println!("tau_fast_base:    {:.3e},", best.tau_fast);
     println!("g_sub_phonon:     {:.3e},", best.g_sub);
     println!("optical_skin_depth_m: {:.1e},", SKIN_DEPTH_M);
-    println!("(reflectivity {:.2} should be applied on the pulse, not the preset)", best.r);
+    println!(
+        "(reflectivity {:.2} should be applied on the pulse, not the preset)",
+        best.r
+    );
 }

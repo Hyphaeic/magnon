@@ -91,11 +91,11 @@ Up to 4 pulses; max enforced.
 ### 2.5 Thermal / LLB (Phase P3+)
 
 ```
---enable-thermal             attach a default ThermalConfig (M3TM observables)
+--enable-thermal             attach ThermalConfig using default fgt preset
 --enable-llb                 engage LLB integrator (implies --enable-thermal)
 --thermal-params-for KEY     ni | py | fgt | fgt-zhou | yig | cofeb (default fgt)
 --t-ambient K                ambient bath T (default 300)
---thermal-dt-cap F           timestep cap during pulse window [s] (advisory)
+--thermal-dt-cap F           enforced thermal substep cap [s]
 ```
 
 ### 2.6 Canonical benchmarks
@@ -169,7 +169,7 @@ Or pin a stack and sweep other axes:
 ### 3.4 Thermal (sweep-level)
 
 ```
---enable-thermal             attach ThermalConfig
+--enable-thermal             attach ThermalConfig using default fgt preset
 --enable-llb                 engage LLB (implies --enable-thermal)
 --thermal-preset KEY         ni | py | fgt | fgt-zhou | yig | cofeb
 --t-ambient K                ambient bath T (default 300)
@@ -335,7 +335,7 @@ thermal is off (so the layout stays consistent).
 | `ni` | 627 | 0.185 | 8·10¹⁷ | Koopmans 2010 verified |
 | `py` (= `permalloy`) | 870 | 0.08 | 1·10¹⁸ | Battiato 2010 |
 | `fgt` (= `fgt-ni-surrogate`) | 220 | 0.185 | 5·10¹⁷ | Ni surrogate; uncalibrated for FGT |
-| `fgt-zhou` (= `fgt-calibrated`) | 210 | 0.185 | 5·10¹⁷ | Zhou 2025 morphology fit, ADR-006 |
+| `fgt-zhou` (= `fgt-calibrated`) | 210 | 0.185 | 5·10¹⁷ | Zhou 2025 single-operating-point morphology fit |
 | `yig` (= `yig-inert`) | 560 | 0 | 0 | Insulator; no M3TM dynamics |
 | `cofeb` | 1100 | 0.15 | 1.1·10¹⁸ | Sato 2018 |
 

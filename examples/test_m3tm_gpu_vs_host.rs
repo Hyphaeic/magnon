@@ -25,7 +25,11 @@ fn main() {
     let mut cfg = SimConfig {
         stack,
         substrate: Substrate::vacuum(),
-        geometry: Geometry { nx: 1, ny: 1, cell_size: 20e-9 },
+        geometry: Geometry {
+            nx: 1,
+            ny: 1,
+            cell_size: 20e-9,
+        },
         dt: 1.0e-15,
         b_ext: [0.0, 0.0, 0.0],
         stab_coeff: 0.0,
@@ -115,8 +119,14 @@ fn main() {
         gpu_m_floor = gpu_m_floor.min(*g);
         max_m_abs = max_m_abs.max((h - g).abs());
     }
-    println!("host T_e peak = {:.2} K, GPU T_e peak = {:.2} K", host_peak, gpu_peak);
-    println!("max relative T_e diff = {:.3e} at step {}", max_rel, at_step);
+    println!(
+        "host T_e peak = {:.2} K, GPU T_e peak = {:.2} K",
+        host_peak, gpu_peak
+    );
+    println!(
+        "max relative T_e diff = {:.3e} at step {}",
+        max_rel, at_step
+    );
     println!(
         "host m floor = {:.6}, GPU m floor = {:.6}, max |Δm| = {:.3e}",
         host_m_floor, gpu_m_floor, max_m_abs
@@ -135,7 +145,10 @@ fn main() {
         }
     }
 
-    assert!(host_peak > 400.0, "host peak too low ({host_peak:.1}K) — laser model broken?");
+    assert!(
+        host_peak > 400.0,
+        "host peak too low ({host_peak:.1}K) — laser model broken?"
+    );
     assert!(
         max_rel < 1.0e-3,
         "GPU and host M3TM disagree: max rel = {:.3e} (tolerance 1e-3)",

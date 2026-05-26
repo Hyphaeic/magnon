@@ -39,7 +39,11 @@ fn run(label: &'static str, tau_fast: f64) -> Trace {
     let mut cfg = SimConfig {
         stack,
         substrate: Substrate::vacuum(),
-        geometry: Geometry { nx: 1, ny: 1, cell_size: 20e-9 },
+        geometry: Geometry {
+            nx: 1,
+            ny: 1,
+            cell_size: 20e-9,
+        },
         dt: 1.0e-15,
         b_ext: [0.0, 0.0, 0.0],
         stab_coeff: 0.0,
@@ -50,9 +54,9 @@ fn run(label: &'static str, tau_fast: f64) -> Trace {
         probe_idx: None,
         probe_layer: None,
     };
-    cfg.photonic.pulses.push(
-        parse_pulse_spec("t=300fs,fwhm=100fs,peak=0.0,dir=z,fluence=1.0,R=0.0").unwrap(),
-    );
+    cfg.photonic
+        .pulses
+        .push(parse_pulse_spec("t=300fs,fwhm=100fs,peak=0.0,dir=z,fluence=1.0,R=0.0").unwrap());
     cfg.photonic.thermal = Some(ThermalConfig {
         t_ambient: 300.0,
         per_layer: vec![preset.clone()],
@@ -93,7 +97,12 @@ fn run(label: &'static str, tau_fast: f64) -> Trace {
             m_at_10ps_post = obs.min_norm;
         }
     }
-    Trace { label, m_floor, m_at_10ps_post, max_target_gap }
+    Trace {
+        label,
+        m_floor,
+        m_at_10ps_post,
+        max_target_gap,
+    }
 }
 
 fn main() {
@@ -124,7 +133,8 @@ fn main() {
         case_c.max_target_gap >= case_b.max_target_gap - 0.01,
         "case C with even-larger tau_fast should not have less lag than case B; \
          got C={:.3e}, B={:.3e}",
-        case_c.max_target_gap, case_b.max_target_gap,
+        case_c.max_target_gap,
+        case_b.max_target_gap,
     );
     println!("\nPASS: F2 two-stage chain produces measurably different dynamics from F1.");
 }

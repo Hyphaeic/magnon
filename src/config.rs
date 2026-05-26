@@ -60,7 +60,11 @@ impl Stack {
     /// Single-layer stack — reproduces pre-multilayer behavior.
     pub fn monolayer(material: BulkMaterial, thickness: f64, u_axis: [f64; 3]) -> Self {
         Self {
-            layers: vec![Layer { material, thickness, u_axis }],
+            layers: vec![Layer {
+                material,
+                thickness,
+                u_axis,
+            }],
             interlayer_a: Vec::new(),
             layer_spacing: Vec::new(),
         }
@@ -77,20 +81,23 @@ impl Stack {
         if self.layers.len() > Self::MAX_LAYERS {
             return Err(format!(
                 "Stack has {} layers; MAX_LAYERS = {}",
-                self.layers.len(), Self::MAX_LAYERS
+                self.layers.len(),
+                Self::MAX_LAYERS
             ));
         }
         let expected_interfaces = self.layers.len().saturating_sub(1);
         if self.interlayer_a.len() != expected_interfaces {
             return Err(format!(
                 "interlayer_a has length {}, expected {}",
-                self.interlayer_a.len(), expected_interfaces
+                self.interlayer_a.len(),
+                expected_interfaces
             ));
         }
         if self.layer_spacing.len() != expected_interfaces {
             return Err(format!(
                 "layer_spacing has length {}, expected {}",
-                self.layer_spacing.len(), expected_interfaces
+                self.layer_spacing.len(),
+                expected_interfaces
             ));
         }
         Ok(())
@@ -111,7 +118,11 @@ impl Geometry {
     /// Default in-plane geometry matching the pre-multilayer default
     /// (cell size ≈ FGT exchange length).
     pub fn thin_2d(nx: u32, ny: u32) -> Self {
-        Self { nx, ny, cell_size: 2.5e-9 }
+        Self {
+            nx,
+            ny,
+            cell_size: 2.5e-9,
+        }
     }
 }
 
@@ -148,11 +159,7 @@ impl SimConfig {
     /// Default FGT single-layer (bulk) on vacuum — preserves pre-M1 behavior.
     pub fn fgt_default(nx: u32, ny: u32) -> Self {
         Self {
-            stack: Stack::monolayer(
-                BulkMaterial::fgt_bulk(),
-                0.7e-9,
-                [0.0, 0.0, 1.0],
-            ),
+            stack: Stack::monolayer(BulkMaterial::fgt_bulk(), 0.7e-9, [0.0, 0.0, 1.0]),
             substrate: Substrate::vacuum(),
             geometry: Geometry::thin_2d(nx, ny),
             // dt must satisfy dt·γ·B_max << 1 for Heun stability.
@@ -174,31 +181,56 @@ impl SimConfig {
         EffectiveParams3D::from_parts(&self.stack, &self.substrate, &self.geometry)
     }
 
-    pub fn nx(&self) -> u32 { self.geometry.nx }
-    pub fn ny(&self) -> u32 { self.geometry.ny }
-    pub fn nz(&self) -> u32 { self.stack.nz() }
-    pub fn cell_size(&self) -> f64 { self.geometry.cell_size }
-    pub fn cell_count(&self) -> u32 { self.nx() * self.ny() * self.nz() }
+    pub fn nx(&self) -> u32 {
+        self.geometry.nx
+    }
+    pub fn ny(&self) -> u32 {
+        self.geometry.ny
+    }
+    pub fn nz(&self) -> u32 {
+        self.stack.nz()
+    }
+    pub fn cell_size(&self) -> f64 {
+        self.geometry.cell_size
+    }
+    pub fn cell_count(&self) -> u32 {
+        self.nx() * self.ny() * self.nz()
+    }
 
     pub fn print_summary(&self) {
         let eff = self.effective();
         eprintln!("=== Magnonic Clock Simulator ===");
         eprintln!("Stack: {} layer(s)", self.stack.layers.len());
         for (i, layer) in self.stack.layers.iter().enumerate() {
-            eprintln!("  [{}] {} @ {:.2} nm, u_axis=({:.2},{:.2},{:.2})",
-                      i, layer.material.name, layer.thickness * 1e9,
-                      layer.u_axis[0], layer.u_axis[1], layer.u_axis[2]);
+            eprintln!(
+                "  [{}] {} @ {:.2} nm, u_axis=({:.2},{:.2},{:.2})",
+                i,
+                layer.material.name,
+                layer.thickness * 1e9,
+                layer.u_axis[0],
+                layer.u_axis[1],
+                layer.u_axis[2]
+            );
         }
         eprintln!("Substrate (bottom interface): {}", self.substrate.name);
-        eprintln!("Geometry : {}×{}×{}, cell {:.2} nm",
-                  self.nx(), self.ny(), self.nz(), self.cell_size() * 1e9);
-        eprintln!("Domain   : {:.1} × {:.1} nm",
-                  self.nx() as f64 * self.cell_size() * 1e9,
-                  self.ny() as f64 * self.cell_size() * 1e9);
+        eprintln!(
+            "Geometry : {}×{}×{}, cell {:.2} nm",
+            self.nx(),
+            self.ny(),
+            self.nz(),
+            self.cell_size() * 1e9
+        );
+        eprintln!(
+            "Domain   : {:.1} × {:.1} nm",
+            self.nx() as f64 * self.cell_size() * 1e9,
+            self.ny() as f64 * self.cell_size() * 1e9
+        );
         eprintln!("Timestep : {:.2} ps", self.dt * 1e12);
         eff.print_decomposition(&self.stack, &self.substrate, &self.geometry);
-        eprintln!("B_ext    : ({:.3}, {:.3}, {:.3}) T",
-                  self.b_ext[0], self.b_ext[1], self.b_ext[2]);
+        eprintln!(
+            "B_ext    : ({:.3}, {:.3}, {:.3}) T",
+            self.b_ext[0], self.b_ext[1], self.b_ext[2]
+        );
         self.photonic.print_summary();
         eprintln!("================================");
     }

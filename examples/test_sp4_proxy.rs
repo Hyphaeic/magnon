@@ -65,7 +65,10 @@ fn main() {
         let dx = (a[0] - b[0]).abs();
         let dy = (a[1] - b[1]).abs();
         let dz = (a[2] - b[2]).abs();
-        if dx > max_abs_mx { max_abs_mx = dx; at_step = i; }
+        if dx > max_abs_mx {
+            max_abs_mx = dx;
+            at_step = i;
+        }
         max_abs_my = max_abs_my.max(dy);
         max_abs_mz = max_abs_mz.max(dz);
     }

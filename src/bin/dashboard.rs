@@ -18,21 +18,29 @@ const THERMAL_PRESETS: &[&str] = &["fgt", "fgt-zhou", "ni", "py", "cofeb", "yig"
 mod text;
 
 fn parse_stack(spec: &str) -> Result<Vec<Layer>, String> {
-    spec.split(',').map(|entry| {
-        let parts: Vec<&str> = entry.trim().split(':').collect();
-        if parts.len() != 2 {
-            return Err(format!("Bad layer spec '{entry}'"));
-        }
-        let name = parts[0].trim();
-        let thickness_nm: f64 = parts[1].trim().parse().map_err(|e| format!("{e}"))?;
-        let material = BulkMaterial::lookup(name)
-            .ok_or_else(|| format!("Unknown material '{name}'"))?;
-        Ok(Layer { material, thickness: thickness_nm * 1e-9, u_axis: [0.0, 0.0, 1.0] })
-    }).collect()
+    spec.split(',')
+        .map(|entry| {
+            let parts: Vec<&str> = entry.trim().split(':').collect();
+            if parts.len() != 2 {
+                return Err(format!("Bad layer spec '{entry}'"));
+            }
+            let name = parts[0].trim();
+            let thickness_nm: f64 = parts[1].trim().parse().map_err(|e| format!("{e}"))?;
+            let material =
+                BulkMaterial::lookup(name).ok_or_else(|| format!("Unknown material '{name}'"))?;
+            Ok(Layer {
+                material,
+                thickness: thickness_nm * 1e-9,
+                u_axis: [0.0, 0.0, 1.0],
+            })
+        })
+        .collect()
 }
 
 fn parse_f64_list(s: &str) -> Result<Vec<f64>, String> {
-    s.split(',').map(|x| x.trim().parse().map_err(|e| format!("{e}"))).collect()
+    s.split(',')
+        .map(|x| x.trim().parse().map_err(|e| format!("{e}")))
+        .collect()
 }
 
 const PLOT_HEIGHT: usize = 200;
@@ -51,10 +59,10 @@ enum HeatmapField {
     Mz,
     Mx,
     My,
-    MMag,       // |m|
-    TeK,        // electron temperature [K]
-    TpK,        // phonon temperature [K]
-    MReduced,   // M3TM's m_reduced (mirrors |mag| under LLB back-coupling)
+    MMag,        // |m|
+    TeK,         // electron temperature [K]
+    TpK,         // phonon temperature [K]
+    MReduced,    // M3TM's m_reduced (mirrors |mag| under LLB back-coupling)
     KspacePower, // |FFT(mx + i·my)|² over the displayed layer, fftshifted (k=0 centre)
 }
 
@@ -149,7 +157,8 @@ impl KspaceEngine {
         // Row FFTs (length nx).
         for iy in 0..ny {
             let row_start = iy * nx;
-            self.fft_x.process(&mut self.grid[row_start..row_start + nx]);
+            self.fft_x
+                .process(&mut self.grid[row_start..row_start + nx]);
         }
         // Column FFTs (length ny) via transpose-and-back.
         for ix in 0..nx {
@@ -221,15 +230,21 @@ fn main() {
     let mut pump_fluence_j_m2: Option<f64> = None;
     let mut pump_reflectivity: f32 = 0.0;
     let mut pump_delay_ps: f64 = 1.0; // L fires a pulse at t_now + pump_delay_ps
-    // Grid mode: show all 8 heatmap fields simultaneously.
+                                      // Grid mode: show all 8 heatmap fields simultaneously.
     let mut grid_mode = false;
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--nx" => { config.geometry.nx = args[i + 1].parse().unwrap(); i += 2; }
-            "--ny" => { config.geometry.ny = args[i + 1].parse().unwrap(); i += 2; }
+            "--nx" => {
+                config.geometry.nx = args[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--ny" => {
+                config.geometry.ny = args[i + 1].parse().unwrap();
+                i += 2;
+            }
             "--thickness" => {
                 let nm: f64 = args[i + 1].parse().unwrap();
                 config.stack.layers[0].thickness = nm * 1e-9;
@@ -261,21 +276,34 @@ fn main() {
                         config.stack.interlayer_a.resize(n_interfaces, 0.0);
                         config.stack.layer_spacing.resize(n_interfaces, 0.7e-9);
                     }
-                    Err(e) => { eprintln!("--stack error: {e}"); std::process::exit(1); }
+                    Err(e) => {
+                        eprintln!("--stack error: {e}");
+                        std::process::exit(1);
+                    }
                 }
                 i += 2;
             }
             "--interlayer-a" => {
                 match parse_f64_list(&args[i + 1]) {
-                    Ok(v) => { config.stack.interlayer_a = v; }
-                    Err(e) => { eprintln!("--interlayer-a error: {e}"); std::process::exit(1); }
+                    Ok(v) => {
+                        config.stack.interlayer_a = v;
+                    }
+                    Err(e) => {
+                        eprintln!("--interlayer-a error: {e}");
+                        std::process::exit(1);
+                    }
                 }
                 i += 2;
             }
             "--layer-spacing" => {
                 match parse_f64_list(&args[i + 1]) {
-                    Ok(v) => { config.stack.layer_spacing = v.iter().map(|nm| nm * 1e-9).collect(); }
-                    Err(e) => { eprintln!("--layer-spacing error: {e}"); std::process::exit(1); }
+                    Ok(v) => {
+                        config.stack.layer_spacing = v.iter().map(|nm| nm * 1e-9).collect();
+                    }
+                    Err(e) => {
+                        eprintln!("--layer-spacing error: {e}");
+                        std::process::exit(1);
+                    }
                 }
                 i += 2;
             }
@@ -283,19 +311,44 @@ fn main() {
                 config.probe_layer = Some(args[i + 1].parse().unwrap());
                 i += 2;
             }
-            "--alpha" => { config.stack.layers[0].material.alpha_bulk = args[i + 1].parse().unwrap(); i += 2; }
-            "--bz" => { config.b_ext[2] = args[i + 1].parse().unwrap(); i += 2; }
-            "--dt" => { config.dt = args[i + 1].parse().unwrap(); i += 2; }
-            "--enable-thermal" => { enable_thermal = true; i += 1; }
-            "--enable-llb" => { enable_thermal = true; enable_llb = true; i += 1; }
+            "--alpha" => {
+                config.stack.layers[0].material.alpha_bulk = args[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--bz" => {
+                config.b_ext[2] = args[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--dt" => {
+                config.dt = args[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--enable-thermal" => {
+                enable_thermal = true;
+                i += 1;
+            }
+            "--enable-llb" => {
+                enable_thermal = true;
+                enable_llb = true;
+                i += 1;
+            }
             "--thermal-preset" | "--thermal-params-for" => {
                 thermal_preset_key = Some(args[i + 1].clone());
                 enable_thermal = true;
                 i += 2;
             }
-            "--t-ambient" => { t_ambient = args[i + 1].parse().unwrap(); i += 2; }
-            "--pump-fwhm" => { pump_fwhm_fs = args[i + 1].parse().unwrap(); i += 2; }
-            "--pump-peak" => { pump_peak_t = args[i + 1].parse().unwrap(); i += 2; }
+            "--t-ambient" => {
+                t_ambient = args[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--pump-fwhm" => {
+                pump_fwhm_fs = args[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--pump-peak" => {
+                pump_peak_t = args[i + 1].parse().unwrap();
+                i += 2;
+            }
             "--pump-dir" => {
                 pump_dir = match args[i + 1].as_str() {
                     "z" | "+z" => [0.0, 0.0, 1.0],
@@ -317,14 +370,25 @@ fn main() {
                 pump_fluence_j_m2 = Some(mj_cm2 * 10.0);
                 i += 2;
             }
-            "--pump-reflectivity" => { pump_reflectivity = args[i + 1].parse().unwrap(); i += 2; }
-            "--pump-delay" => { pump_delay_ps = args[i + 1].parse().unwrap(); i += 2; }
-            "--grid" | "-g" => { grid_mode = true; i += 1; }
+            "--pump-reflectivity" => {
+                pump_reflectivity = args[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--pump-delay" => {
+                pump_delay_ps = args[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--grid" | "-g" => {
+                grid_mode = true;
+                i += 1;
+            }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
             }
-            _ => { i += 1; }
+            _ => {
+                i += 1;
+            }
         }
     }
 
@@ -446,7 +510,9 @@ fn main() {
     while window.is_open() && !window.is_key_down(Key::Escape) {
         let t0 = Instant::now();
 
-        if window.is_key_pressed(Key::Space, KeyRepeat::No) { running = !running; }
+        if window.is_key_pressed(Key::Space, KeyRepeat::No) {
+            running = !running;
+        }
         if window.is_key_pressed(Key::Up, KeyRepeat::Yes) {
             steps_per_frame = (steps_per_frame * 2).min(10_000);
             eprintln!("steps/frame = {steps_per_frame}");
@@ -480,7 +546,9 @@ fn main() {
             b_ext_x = pulse_strength;
             solver.set_b_ext(b_ext_x, 0.0, b_ext_z);
             eprintln!("PULSE: Bx = {pulse_strength:.1} T for {pulse_duration} frames");
-            if !running { running = true; }
+            if !running {
+                running = true;
+            }
         }
         if window.is_key_pressed(Key::Right, KeyRepeat::Yes) {
             pulse_strength = (pulse_strength + 0.5).min(10.0);
@@ -532,7 +600,8 @@ fn main() {
         if window.is_key_pressed(Key::L, KeyRepeat::No) {
             let t_now = solver.t_sim();
             let fwhm = pump_fwhm_fs * 1e-15;
-            let mut pulse = LaserPulse::new(t_now + pump_delay_ps * 1e-12, fwhm, pump_peak_t, pump_dir);
+            let mut pulse =
+                LaserPulse::new(t_now + pump_delay_ps * 1e-12, fwhm, pump_peak_t, pump_dir);
             pulse.peak_fluence = pump_fluence_j_m2;
             pulse.reflectivity = pump_reflectivity;
             solver.add_pulse(pulse);
@@ -545,7 +614,9 @@ fn main() {
                 t_now * 1e12, pump_delay_ps, pump_fwhm_fs, pump_peak_t,
                 pump_dir[0], pump_dir[1], pump_dir[2],
             );
-            if !running { running = true; }
+            if !running {
+                running = true;
+            }
         }
 
         // T — toggle thermal on/off.
@@ -593,7 +664,14 @@ fn main() {
                         enable_llb,
                     };
                     solver.set_thermal(Some(cfg));
-                    eprintln!("INTEGRATOR: {}", if enable_llb { "LLB" } else { "LLG (+ M3TM observability)" });
+                    eprintln!(
+                        "INTEGRATOR: {}",
+                        if enable_llb {
+                            "LLB"
+                        } else {
+                            "LLG (+ M3TM observability)"
+                        }
+                    );
                 }
             } else {
                 eprintln!("INTEGRATOR: enable thermal (T) first to engage LLB");
@@ -603,19 +681,26 @@ fn main() {
         // [ / ] — T_ambient ∓ 10 K. Only affects the thermal bath; no effect when thermal off.
         if window.is_key_pressed(Key::LeftBracket, KeyRepeat::Yes) {
             t_ambient = (t_ambient - 10.0).max(0.0);
-            if enable_thermal { solver.set_thermal_ambient(t_ambient); }
+            if enable_thermal {
+                solver.set_thermal_ambient(t_ambient);
+            }
             eprintln!("T_ambient = {t_ambient:.0} K");
         }
         if window.is_key_pressed(Key::RightBracket, KeyRepeat::Yes) {
             t_ambient = (t_ambient + 10.0).min(5000.0);
-            if enable_thermal { solver.set_thermal_ambient(t_ambient); }
+            if enable_thermal {
+                solver.set_thermal_ambient(t_ambient);
+            }
             eprintln!("T_ambient = {t_ambient:.0} K");
         }
 
         // I — cycle thermal preset. Requires thermal to be on; engages with the new preset.
         if window.is_key_pressed(Key::I, KeyRepeat::No) {
             let current = thermal_preset_key.as_deref().unwrap_or("fgt");
-            let idx = THERMAL_PRESETS.iter().position(|&k| k == current).unwrap_or(0);
+            let idx = THERMAL_PRESETS
+                .iter()
+                .position(|&k| k == current)
+                .unwrap_or(0);
             let next = THERMAL_PRESETS[(idx + 1) % THERMAL_PRESETS.len()];
             thermal_preset_key = Some(next.to_string());
             if enable_thermal {
@@ -659,8 +744,10 @@ fn main() {
             eprintln!("VIEW: {}", all_fields[field_idx].label());
         }
         for (key, layer) in [
-            (Key::Key1, 0u32), (Key::Key2, 1u32),
-            (Key::Key3, 2u32), (Key::Key4, 3u32),
+            (Key::Key1, 0u32),
+            (Key::Key2, 1u32),
+            (Key::Key3, 2u32),
+            (Key::Key4, 3u32),
         ] {
             if window.is_key_pressed(key, KeyRepeat::No) && layer < nz {
                 display_layer = layer;
@@ -706,14 +793,20 @@ fn main() {
             push_trim(&mut probe_hist, obs.probe_mz, win_w);
 
             let dt = t0.elapsed().as_secs_f64();
-            if dt > 0.0 { steps_per_sec = steps_per_frame as f64 / dt; }
+            if dt > 0.0 {
+                steps_per_sec = steps_per_frame as f64 / dt;
+            }
 
             let pulse_tag = if pulse_frames_left > 0 {
                 format!(" | PULSE Bx={b_ext_x:.1}T [{pulse_frames_left}]")
-            } else { String::new() };
+            } else {
+                String::new()
+            };
             let layer_tag = if nz > 1 {
                 format!(" | Layer {}/{}", display_layer, nz)
-            } else { String::new() };
+            } else {
+                String::new()
+            };
             window.set_title(&format!(
                 "Step {} | {:.1}ps | Mz={:.4} | probe={:.4} | α={:.4} | Bz={:.1}T{}{} | {:.0}st/s | {}/fr",
                 obs.step, obs.time_ps, obs.avg_mz, obs.probe_mz,
@@ -727,19 +820,41 @@ fn main() {
         // the rest is painted by the panel / label / plot draws.
         let field = all_fields[field_idx];
         let (field_min, field_max) = field_range(
-            field, &mag_data, &temp_e_data, &temp_p_data, &m_red_data,
+            field,
+            &mag_data,
+            &temp_e_data,
+            &temp_p_data,
+            &m_red_data,
             kspace.as_ref(),
-            nx, ny, display_layer as usize, t_ambient,
+            nx,
+            ny,
+            display_layer as usize,
+            t_ambient,
         );
 
         if grid_mode {
             // Grid layout order — top row = real-space magnetization;
             // bottom row = thermal & k-space views. Independent of V-cycle order.
             let grid_fields: [HeatmapField; 8] = [
-                HeatmapField::Mz, HeatmapField::Mx, HeatmapField::My, HeatmapField::MMag,
-                HeatmapField::TeK, HeatmapField::TpK, HeatmapField::MReduced, HeatmapField::KspacePower,
+                HeatmapField::Mz,
+                HeatmapField::Mx,
+                HeatmapField::My,
+                HeatmapField::MMag,
+                HeatmapField::TeK,
+                HeatmapField::TpK,
+                HeatmapField::MReduced,
+                HeatmapField::KspacePower,
             ];
-            text::fill_rect(&mut framebuf, win_w, win_h, 0, 0, heatmap_region_w, heatmap_region_h, 0x0a0a0a);
+            text::fill_rect(
+                &mut framebuf,
+                win_w,
+                win_h,
+                0,
+                0,
+                heatmap_region_w,
+                heatmap_region_h,
+                0x0a0a0a,
+            );
             // k-space tile is always visible in grid mode — always compute when running.
             if running {
                 let eng = kspace.get_or_insert_with(|| KspaceEngine::new(nx, ny));
@@ -755,30 +870,71 @@ fn main() {
                 let tile_x0 = col * (nx + GRID_GAP);
                 let tile_y0 = row * (ny + LABEL_HEIGHT + GRID_GAP);
                 // Label strip above the tile.
-                text::fill_rect(&mut framebuf, win_w, win_h, tile_x0, tile_y0, nx, LABEL_HEIGHT, 0x111111);
+                text::fill_rect(
+                    &mut framebuf,
+                    win_w,
+                    win_h,
+                    tile_x0,
+                    tile_y0,
+                    nx,
+                    LABEL_HEIGHT,
+                    0x111111,
+                );
                 let label_color = if f == field { 0xFFEE99 } else { 0xAAAAAA };
                 text::draw_text(
-                    &mut framebuf, win_w, win_h,
-                    tile_x0 + 2, tile_y0 + 3,
-                    f.label(), label_color,
+                    &mut framebuf,
+                    win_w,
+                    win_h,
+                    tile_x0 + 2,
+                    tile_y0 + 3,
+                    f.label(),
+                    label_color,
                 );
                 // Tile body. Thermal fields dim when thermal is off.
                 let dim = f.requires_thermal() && !enable_thermal;
                 let (fmin, fmax) = field_range(
-                    f, &mag_data, &temp_e_data, &temp_p_data, &m_red_data,
+                    f,
+                    &mag_data,
+                    &temp_e_data,
+                    &temp_p_data,
+                    &m_red_data,
                     kspace.as_ref(),
-                    nx, ny, display_layer as usize, t_ambient,
+                    nx,
+                    ny,
+                    display_layer as usize,
+                    t_ambient,
                 );
                 draw_heatmap_tile(
-                    &mut framebuf, win_w, win_h,
-                    tile_x0, tile_y0 + LABEL_HEIGHT,
-                    f, &mag_data, &temp_e_data, &temp_p_data, &m_red_data,
+                    &mut framebuf,
+                    win_w,
+                    win_h,
+                    tile_x0,
+                    tile_y0 + LABEL_HEIGHT,
+                    f,
+                    &mag_data,
+                    &temp_e_data,
+                    &temp_p_data,
+                    &m_red_data,
                     kspace.as_ref(),
-                    nx, ny, display_layer as usize, fmin, fmax, dim,
+                    nx,
+                    ny,
+                    display_layer as usize,
+                    fmin,
+                    fmax,
+                    dim,
                 );
                 // Highlight focused tile with a 1-px border.
                 if f == field {
-                    draw_tile_border(&mut framebuf, win_w, win_h, tile_x0, tile_y0 + LABEL_HEIGHT, nx, ny, 0xFFEE99);
+                    draw_tile_border(
+                        &mut framebuf,
+                        win_w,
+                        win_h,
+                        tile_x0,
+                        tile_y0 + LABEL_HEIGHT,
+                        nx,
+                        ny,
+                        0xFFEE99,
+                    );
                 }
             }
             // Fill gap column between grid region and status panel.
@@ -789,11 +945,23 @@ fn main() {
             }
         } else {
             draw_heatmap_tile(
-                &mut framebuf, win_w, win_h,
-                0, 0,
-                field, &mag_data, &temp_e_data, &temp_p_data, &m_red_data,
+                &mut framebuf,
+                win_w,
+                win_h,
+                0,
+                0,
+                field,
+                &mag_data,
+                &temp_e_data,
+                &temp_p_data,
+                &m_red_data,
                 kspace.as_ref(),
-                nx, ny, display_layer as usize, field_min, field_max, false,
+                nx,
+                ny,
+                display_layer as usize,
+                field_min,
+                field_max,
+                false,
             );
             // Fill gap between heatmap and status panel (single mode).
             for y in 0..ny.min(win_h) {
@@ -803,20 +971,49 @@ fn main() {
             }
         }
         draw_status_panel(
-            &mut framebuf, win_w, win_h,
-            side_panel_x, 0, win_w.saturating_sub(side_panel_x), heatmap_h,
-            &obs, field, field_min, field_max,
-            enable_thermal, enable_llb, grid_mode,
-            alpha, b_ext_x, b_ext_z,
-            pulse_frames_left, pulse_strength,
-            display_layer, nz,
-            steps_per_frame, steps_per_sec,
+            &mut framebuf,
+            win_w,
+            win_h,
+            side_panel_x,
+            0,
+            win_w.saturating_sub(side_panel_x),
+            heatmap_h,
+            &obs,
+            field,
+            field_min,
+            field_max,
+            enable_thermal,
+            enable_llb,
+            grid_mode,
+            alpha,
+            b_ext_x,
+            b_ext_z,
+            pulse_frames_left,
+            pulse_strength,
+            display_layer,
+            nz,
+            steps_per_frame,
+            steps_per_sec,
             t_ambient,
         );
-        draw_label_bar(&mut framebuf, win_w, win_h, plot_start_y - LABEL_HEIGHT, LABEL_HEIGHT, pulse_frames_left > 0);
+        draw_label_bar(
+            &mut framebuf,
+            win_w,
+            win_h,
+            plot_start_y - LABEL_HEIGHT,
+            LABEL_HEIGHT,
+            pulse_frames_left > 0,
+        );
         draw_plot_strip(
-            &mut framebuf, win_w, win_h, plot_start_y, PLOT_HEIGHT,
-            &mz_hist, &mx_hist, &my_hist, &probe_hist,
+            &mut framebuf,
+            win_w,
+            win_h,
+            plot_start_y,
+            PLOT_HEIGHT,
+            &mz_hist,
+            &mx_hist,
+            &my_hist,
+            &probe_hist,
         );
 
         window.update_with_buffer(&framebuf, win_w, win_h).unwrap();
@@ -827,7 +1024,10 @@ fn main() {
 
 fn field_sample(
     field: HeatmapField,
-    mag: &[f32], te: &[f32], tp: &[f32], mr: &[f32],
+    mag: &[f32],
+    te: &[f32],
+    tp: &[f32],
+    mr: &[f32],
     cell: usize,
 ) -> f32 {
     match field {
@@ -851,9 +1051,15 @@ fn field_sample(
 
 fn field_range(
     field: HeatmapField,
-    mag: &[f32], te: &[f32], tp: &[f32], mr: &[f32],
+    mag: &[f32],
+    te: &[f32],
+    tp: &[f32],
+    mr: &[f32],
     kspace: Option<&KspaceEngine>,
-    nx: usize, ny: usize, display_layer: usize, t_ambient: f32,
+    nx: usize,
+    ny: usize,
+    display_layer: usize,
+    t_ambient: f32,
 ) -> (f32, f32) {
     if field.is_kspace() {
         return kspace.map(|k| k.last_db_range).unwrap_or((-60.0, 0.0));
@@ -870,7 +1076,9 @@ fn field_range(
             for ix in 0..nx {
                 let cell = layer_offset + ix * ny + iy;
                 let v = field_sample(field, mag, te, tp, mr, cell).abs();
-                if v > amax { amax = v; }
+                if v > amax {
+                    amax = v;
+                }
             }
         }
         // Floor to 0.05 so a pure-equilibrium state doesn't amplify numerical
@@ -891,8 +1099,12 @@ fn field_range(
                 for ix in 0..nx {
                     let cell = layer_offset + ix * ny + iy;
                     let v = field_sample(field, mag, te, tp, mr, cell);
-                    if v < mn { mn = v; }
-                    if v > mx { mx = v; }
+                    if v < mn {
+                        mn = v;
+                    }
+                    if v > mx {
+                        mx = v;
+                    }
                 }
             }
             if !mn.is_finite() || !mx.is_finite() {
@@ -900,7 +1112,11 @@ fn field_range(
             }
             let floor = t_ambient.min(mn);
             let ceil = (t_ambient + 100.0).max(mx);
-            if ceil - floor < 5.0 { (floor, floor + 5.0) } else { (floor, ceil) }
+            if ceil - floor < 5.0 {
+                (floor, floor + 5.0)
+            } else {
+                (floor, ceil)
+            }
         }
         _ => (-1.0, 1.0),
     }
@@ -908,41 +1124,66 @@ fn field_range(
 
 fn push_trim(v: &mut Vec<f32>, val: f32, max: usize) {
     v.push(val);
-    if v.len() > max { v.remove(0); }
+    if v.len() > max {
+        v.remove(0);
+    }
 }
 
 // ── Rendering ──────────────────────────────────────────────────────
 
 fn draw_tile_border(
-    buf: &mut [u32], stride: usize, total_h: usize,
-    x0: usize, y0: usize, w: usize, h: usize, color: u32,
+    buf: &mut [u32],
+    stride: usize,
+    total_h: usize,
+    x0: usize,
+    y0: usize,
+    w: usize,
+    h: usize,
+    color: u32,
 ) {
     for dx in 0..w {
         let x = x0 + dx;
         if x < stride {
-            if y0 < total_h { buf[y0 * stride + x] = color; }
+            if y0 < total_h {
+                buf[y0 * stride + x] = color;
+            }
             let yb = y0 + h.saturating_sub(1);
-            if yb < total_h { buf[yb * stride + x] = color; }
+            if yb < total_h {
+                buf[yb * stride + x] = color;
+            }
         }
     }
     for dy in 0..h {
         let y = y0 + dy;
         if y < total_h {
-            if x0 < stride { buf[y * stride + x0] = color; }
+            if x0 < stride {
+                buf[y * stride + x0] = color;
+            }
             let xr = x0 + w.saturating_sub(1);
-            if xr < stride { buf[y * stride + xr] = color; }
+            if xr < stride {
+                buf[y * stride + xr] = color;
+            }
         }
     }
 }
 
 fn draw_heatmap_tile(
-    buf: &mut [u32], stride: usize, total_h: usize,
-    tile_x0: usize, tile_y0: usize,
+    buf: &mut [u32],
+    stride: usize,
+    total_h: usize,
+    tile_x0: usize,
+    tile_y0: usize,
     field: HeatmapField,
-    mag: &[f32], te: &[f32], tp: &[f32], mr: &[f32],
+    mag: &[f32],
+    te: &[f32],
+    tp: &[f32],
+    mr: &[f32],
     kspace: Option<&KspaceEngine>,
-    nx: usize, ny: usize, display_layer: usize,
-    field_min: f32, field_max: f32,
+    nx: usize,
+    ny: usize,
+    display_layer: usize,
+    field_min: f32,
+    field_max: f32,
     dim: bool, // true = greyscale-ish / low-contrast, used when a thermal field is inactive
 ) {
     let layer_offset = display_layer * nx * ny;
@@ -961,7 +1202,10 @@ fn draw_heatmap_tile(
             } else if signed {
                 diverging_rgb(v, field_min, field_max)
             } else {
-                let hot = matches!(field, HeatmapField::TeK | HeatmapField::TpK | HeatmapField::KspacePower);
+                let hot = matches!(
+                    field,
+                    HeatmapField::TeK | HeatmapField::TpK | HeatmapField::KspacePower
+                );
                 sequential_rgb(v, field_min, field_max, hot)
             };
             let x = tile_x0 + ix;
@@ -973,7 +1217,14 @@ fn draw_heatmap_tile(
     }
 }
 
-fn draw_label_bar(buf: &mut [u32], stride: usize, total_h: usize, y_offset: usize, height: usize, pulsing: bool) {
+fn draw_label_bar(
+    buf: &mut [u32],
+    stride: usize,
+    total_h: usize,
+    y_offset: usize,
+    height: usize,
+    pulsing: bool,
+) {
     let bg = if pulsing { 0x442200 } else { 0x111111 };
     text::fill_rect(buf, stride, total_h, 0, y_offset, stride, height, bg);
     let y_mid = y_offset + height / 2;
@@ -993,13 +1244,28 @@ fn draw_label_bar(buf: &mut [u32], stride: usize, total_h: usize, y_offset: usiz
                 }
             }
         }
-        text::draw_text(buf, stride, total_h, x_start + 12, y_mid - 3, label, 0xBBBBBB);
+        text::draw_text(
+            buf,
+            stride,
+            total_h,
+            x_start + 12,
+            y_mid - 3,
+            label,
+            0xBBBBBB,
+        );
     }
 }
 
 fn draw_plot_strip(
-    buf: &mut [u32], stride: usize, total_h: usize, y_offset: usize, height: usize,
-    mz: &[f32], mx: &[f32], my: &[f32], probe: &[f32],
+    buf: &mut [u32],
+    stride: usize,
+    total_h: usize,
+    y_offset: usize,
+    height: usize,
+    mz: &[f32],
+    mx: &[f32],
+    my: &[f32],
+    probe: &[f32],
 ) {
     let bg = 0x1a1a1a;
     text::fill_rect(buf, stride, total_h, 0, y_offset, stride, height, bg);
@@ -1020,20 +1286,34 @@ fn draw_plot_strip(
     }
     text::draw_text(buf, stride, total_h, 4, y_offset + 2, "+1", 0x666666);
     text::draw_text(buf, stride, total_h, 4, zero_y - 3, "0", 0x666666);
-    text::draw_text(buf, stride, total_h, 4, y_offset + height - 10, "-1", 0x666666);
+    text::draw_text(
+        buf,
+        stride,
+        total_h,
+        4,
+        y_offset + height - 10,
+        "-1",
+        0x666666,
+    );
 
     let plot_line = |buf: &mut [u32], data: &[f32], color: u32, thick: bool| {
         let n = data.len();
         let x_start = stride.saturating_sub(n);
         for (i, &val) in data.iter().enumerate() {
             let x = x_start + i;
-            if x >= stride { continue; }
+            if x >= stride {
+                continue;
+            }
             let t = ((val + 1.0) * 0.5).clamp(0.0, 1.0);
             let y = y_offset + height - 1 - ((t * (height - 1) as f32) as usize).min(height - 1);
             buf[y * stride + x] = color;
             if thick {
-                if y > y_offset { buf[(y - 1) * stride + x] = color; }
-                if y + 1 < y_offset + height { buf[(y + 1) * stride + x] = color; }
+                if y > y_offset {
+                    buf[(y - 1) * stride + x] = color;
+                }
+                if y + 1 < y_offset + height {
+                    buf[(y + 1) * stride + x] = color;
+                }
             }
         }
     };
@@ -1046,29 +1326,53 @@ fn draw_plot_strip(
 // ── Status panel (D1) ──────────────────────────────────────────
 
 fn draw_status_panel(
-    buf: &mut [u32], stride: usize, total_h: usize,
-    x0: usize, y0: usize, w: usize, h: usize,
+    buf: &mut [u32],
+    stride: usize,
+    total_h: usize,
+    x0: usize,
+    y0: usize,
+    w: usize,
+    h: usize,
     obs: &magnonic_clock_sim::gpu::Observables,
-    field: HeatmapField, field_min: f32, field_max: f32,
-    thermal_on: bool, llb_on: bool, grid_mode: bool,
-    alpha: f32, b_ext_x: f32, b_ext_z: f32,
-    pulse_frames_left: u32, pulse_strength: f32,
-    display_layer: u32, nz: u32,
-    steps_per_frame: usize, steps_per_sec: f64,
+    field: HeatmapField,
+    field_min: f32,
+    field_max: f32,
+    thermal_on: bool,
+    llb_on: bool,
+    grid_mode: bool,
+    alpha: f32,
+    b_ext_x: f32,
+    b_ext_z: f32,
+    pulse_frames_left: u32,
+    pulse_strength: f32,
+    display_layer: u32,
+    nz: u32,
+    steps_per_frame: usize,
+    steps_per_sec: f64,
     t_ambient: f32,
 ) {
-    if w == 0 { return; }
+    if w == 0 {
+        return;
+    }
     text::fill_rect(buf, stride, total_h, x0, y0, w, h, 0x0f0f0f);
     // 1-px right border for visual separation from the left edge of the window.
     for y in y0..(y0 + h).min(total_h) {
-        if x0 < stride { buf[y * stride + x0] = 0x333333; }
+        if x0 < stride {
+            buf[y * stride + x0] = 0x333333;
+        }
     }
 
     let label_color: u32 = 0x888888;
     let value_color: u32 = 0xDDDDDD;
     let ok_color: u32 = 0x66CC88;
     let warn_color: u32 = 0xCC8844;
-    let mode_color: u32 = if llb_on { 0x88AACC } else if thermal_on { ok_color } else { 0x666666 };
+    let mode_color: u32 = if llb_on {
+        0x88AACC
+    } else if thermal_on {
+        ok_color
+    } else {
+        0x666666
+    };
 
     let mut y = y0 + 4;
     let x_label = x0 + 6;
@@ -1085,30 +1389,80 @@ fn draw_status_panel(
     };
     text::draw_text(buf, stride, total_h, x_label, y, "[", 0x666666);
     text::draw_text(buf, stride, total_h, x_label + 6, y, integrator, mode_color);
-    text::draw_text(buf, stride, total_h, x_label + 6 + integrator.len() * text::CELL_W, y, "]", 0x666666);
-    text::draw_text(buf, stride, total_h, x_label + 6 + (integrator.len() + 2) * text::CELL_W, y, &thermal_tag, label_color);
+    text::draw_text(
+        buf,
+        stride,
+        total_h,
+        x_label + 6 + integrator.len() * text::CELL_W,
+        y,
+        "]",
+        0x666666,
+    );
+    text::draw_text(
+        buf,
+        stride,
+        total_h,
+        x_label + 6 + (integrator.len() + 2) * text::CELL_W,
+        y,
+        &thermal_tag,
+        label_color,
+    );
     y += text::CELL_H + 2;
     if grid_mode {
         text::draw_text(buf, stride, total_h, x_label, y, "grid view", 0x88AACC);
-        text::draw_text(buf, stride, total_h, x_label + 11 * text::CELL_W, y, "(focus: V to cycle)", 0x666666);
+        text::draw_text(
+            buf,
+            stride,
+            total_h,
+            x_label + 11 * text::CELL_W,
+            y,
+            "(focus: V to cycle)",
+            0x666666,
+        );
         y += text::CELL_H + 2;
     }
 
     // Separator line
     for dx in 0..w.saturating_sub(12) {
-        if x_label + dx < stride && y < total_h { buf[y * stride + x_label + dx] = 0x222222; }
+        if x_label + dx < stride && y < total_h {
+            buf[y * stride + x_label + dx] = 0x222222;
+        }
     }
     y += 3;
 
     // Time + throughput
     text::draw_text(buf, stride, total_h, x_label, y, "t", label_color);
-    text::draw_text(buf, stride, total_h, x_val, y, &format!("{:.2} ps", obs.time_ps), value_color);
+    text::draw_text(
+        buf,
+        stride,
+        total_h,
+        x_val,
+        y,
+        &format!("{:.2} ps", obs.time_ps),
+        value_color,
+    );
     y += text::CELL_H;
     text::draw_text(buf, stride, total_h, x_label, y, "step", label_color);
-    text::draw_text(buf, stride, total_h, x_val, y, &format!("{}", obs.step), value_color);
+    text::draw_text(
+        buf,
+        stride,
+        total_h,
+        x_val,
+        y,
+        &format!("{}", obs.step),
+        value_color,
+    );
     y += text::CELL_H;
     text::draw_text(buf, stride, total_h, x_label, y, "rate", label_color);
-    text::draw_text(buf, stride, total_h, x_val, y, &format!("{:.0}/s  {}/fr", steps_per_sec, steps_per_frame), value_color);
+    text::draw_text(
+        buf,
+        stride,
+        total_h,
+        x_val,
+        y,
+        &format!("{:.0}/s  {}/fr", steps_per_sec, steps_per_frame),
+        value_color,
+    );
     y += text::CELL_H + 3;
 
     // Current field
@@ -1120,61 +1474,189 @@ fn draw_status_panel(
     text::draw_text(buf, stride, total_h, x_val, y, &field_desc, 0xFFEE99);
     y += text::CELL_H;
     text::draw_text(buf, stride, total_h, x_label, y, "range", label_color);
-    text::draw_text(buf, stride, total_h, x_val, y, &format!("{:.3} .. {:.3}", field_min, field_max), value_color);
+    text::draw_text(
+        buf,
+        stride,
+        total_h,
+        x_val,
+        y,
+        &format!("{:.3} .. {:.3}", field_min, field_max),
+        value_color,
+    );
     y += text::CELL_H + 3;
 
     // Magnetization summary
     text::draw_text(buf, stride, total_h, x_label, y, "avg Mz", label_color);
-    text::draw_text(buf, stride, total_h, x_val, y, &format!("{:+.4}", obs.avg_mz), value_color);
+    text::draw_text(
+        buf,
+        stride,
+        total_h,
+        x_val,
+        y,
+        &format!("{:+.4}", obs.avg_mz),
+        value_color,
+    );
     y += text::CELL_H;
     text::draw_text(buf, stride, total_h, x_label, y, "|m|", label_color);
-    text::draw_text(buf, stride, total_h, x_val, y, &format!("{:.4}..{:.4}", obs.min_norm, obs.max_norm), value_color);
+    text::draw_text(
+        buf,
+        stride,
+        total_h,
+        x_val,
+        y,
+        &format!("{:.4}..{:.4}", obs.min_norm, obs.max_norm),
+        value_color,
+    );
     y += text::CELL_H;
     text::draw_text(buf, stride, total_h, x_label, y, "probe", label_color);
-    text::draw_text(buf, stride, total_h, x_val, y, &format!("{:+.4}", obs.probe_mz), value_color);
+    text::draw_text(
+        buf,
+        stride,
+        total_h,
+        x_val,
+        y,
+        &format!("{:+.4}", obs.probe_mz),
+        value_color,
+    );
     y += text::CELL_H + 3;
 
     // Thermal readouts
     if thermal_on {
         text::draw_text(buf, stride, total_h, x_label, y, "Te max", label_color);
-        text::draw_text(buf, stride, total_h, x_val, y, &format!("{:.0} K", obs.max_t_e), value_color);
+        text::draw_text(
+            buf,
+            stride,
+            total_h,
+            x_val,
+            y,
+            &format!("{:.0} K", obs.max_t_e),
+            value_color,
+        );
         y += text::CELL_H;
         text::draw_text(buf, stride, total_h, x_label, y, "Tp max", label_color);
-        text::draw_text(buf, stride, total_h, x_val, y, &format!("{:.0} K", obs.max_t_p), value_color);
+        text::draw_text(
+            buf,
+            stride,
+            total_h,
+            x_val,
+            y,
+            &format!("{:.0} K", obs.max_t_p),
+            value_color,
+        );
         y += text::CELL_H;
         text::draw_text(buf, stride, total_h, x_label, y, "|m|red", label_color);
-        text::draw_text(buf, stride, total_h, x_val, y, &format!("{:.4}", obs.min_m_reduced), value_color);
+        text::draw_text(
+            buf,
+            stride,
+            total_h,
+            x_val,
+            y,
+            &format!("{:.4}", obs.min_m_reduced),
+            value_color,
+        );
         y += text::CELL_H + 3;
     }
 
     // Controls
     text::draw_text(buf, stride, total_h, x_label, y, "a", label_color);
-    text::draw_text(buf, stride, total_h, x_val, y, &format!("{:.5}", alpha), value_color);
+    text::draw_text(
+        buf,
+        stride,
+        total_h,
+        x_val,
+        y,
+        &format!("{:.5}", alpha),
+        value_color,
+    );
     y += text::CELL_H;
     text::draw_text(buf, stride, total_h, x_label, y, "Bz", label_color);
-    text::draw_text(buf, stride, total_h, x_val, y, &format!("{:+.2} T", b_ext_z), value_color);
+    text::draw_text(
+        buf,
+        stride,
+        total_h,
+        x_val,
+        y,
+        &format!("{:+.2} T", b_ext_z),
+        value_color,
+    );
     y += text::CELL_H;
     if b_ext_x.abs() > 1e-6 || pulse_frames_left > 0 {
         text::draw_text(buf, stride, total_h, x_label, y, "Bx", label_color);
-        text::draw_text(buf, stride, total_h, x_val, y, &format!("{:+.2} T [{}]", b_ext_x, pulse_frames_left), warn_color);
+        text::draw_text(
+            buf,
+            stride,
+            total_h,
+            x_val,
+            y,
+            &format!("{:+.2} T [{}]", b_ext_x, pulse_frames_left),
+            warn_color,
+        );
         y += text::CELL_H;
     }
     text::draw_text(buf, stride, total_h, x_label, y, "pulse", label_color);
-    text::draw_text(buf, stride, total_h, x_val, y, &format!("{:.1} T (P to fire)", pulse_strength), value_color);
+    text::draw_text(
+        buf,
+        stride,
+        total_h,
+        x_val,
+        y,
+        &format!("{:.1} T (P to fire)", pulse_strength),
+        value_color,
+    );
     y += text::CELL_H + 3;
 
     // Stack
     if nz > 1 {
         text::draw_text(buf, stride, total_h, x_label, y, "layer", label_color);
-        text::draw_text(buf, stride, total_h, x_val, y, &format!("{} / {}", display_layer, nz), value_color);
+        text::draw_text(
+            buf,
+            stride,
+            total_h,
+            x_val,
+            y,
+            &format!("{} / {}", display_layer, nz),
+            value_color,
+        );
     }
 
     // Footer — abbreviated controls.
     let footer_y = y0 + h.saturating_sub(4 * text::CELL_H + 4);
-    text::draw_text(buf, stride, total_h, x_label, footer_y, "V:view  L:laser  P:Bx", 0x666666);
-    text::draw_text(buf, stride, total_h, x_label, footer_y + text::CELL_H, "T:thermal  G:LLB  I:preset", 0x666666);
-    text::draw_text(buf, stride, total_h, x_label, footer_y + 2 * text::CELL_H, "[/]:T_amb  X:clear pulses", 0x666666);
-    text::draw_text(buf, stride, total_h, x_label, footer_y + 3 * text::CELL_H, "R/D/U/S/K reset  C:plot", 0x666666);
+    text::draw_text(
+        buf,
+        stride,
+        total_h,
+        x_label,
+        footer_y,
+        "V:view  L:laser  P:Bx",
+        0x666666,
+    );
+    text::draw_text(
+        buf,
+        stride,
+        total_h,
+        x_label,
+        footer_y + text::CELL_H,
+        "T:thermal  G:LLB  I:preset",
+        0x666666,
+    );
+    text::draw_text(
+        buf,
+        stride,
+        total_h,
+        x_label,
+        footer_y + 2 * text::CELL_H,
+        "[/]:T_amb  X:clear pulses",
+        0x666666,
+    );
+    text::draw_text(
+        buf,
+        stride,
+        total_h,
+        x_label,
+        footer_y + 3 * text::CELL_H,
+        "R/D/U/S/K reset  C:plot",
+        0x666666,
+    );
 }
 
 // ── Colormaps ──────────────────────────────────────────────────────
@@ -1189,7 +1671,11 @@ fn diverging_rgb(v: f32, vmin: f32, vmax: f32) -> u32 {
         ((s * 255.0) as u32, (s * 255.0) as u32, 255u32)
     } else {
         let s = (t - 0.5) * 2.0;
-        (255u32, ((1.0 - s) * 255.0) as u32, ((1.0 - s) * 255.0) as u32)
+        (
+            255u32,
+            ((1.0 - s) * 255.0) as u32,
+            ((1.0 - s) * 255.0) as u32,
+        )
     };
     (r << 16) | (g << 8) | b
 }
@@ -1260,14 +1746,16 @@ fn print_help() {
     eprintln!();
     eprintln!("Stack / geometry:");
     eprintln!("  --material NAME / --substrate NAME / --thickness NM");
-    eprintln!("  --stack \"MAT1:T_nm,MAT2:T_nm,...\" --interlayer-a F,F,... --layer-spacing NM,NM,...");
+    eprintln!(
+        "  --stack \"MAT1:T_nm,MAT2:T_nm,...\" --interlayer-a F,F,... --layer-spacing NM,NM,..."
+    );
     eprintln!("  --nx N  --ny N");
     eprintln!();
     eprintln!("Dynamics:");
     eprintln!("  --alpha F / --bz T / --dt S");
     eprintln!();
     eprintln!("Thermal / LLB (Phase P3+):");
-    eprintln!("  --enable-thermal           attach a ThermalConfig (M3TM observables populated)");
+    eprintln!("  --enable-thermal           attach a ThermalConfig (default preset fgt)");
     eprintln!("  --enable-llb               engage LLB integrator (implies --enable-thermal)");
     eprintln!("  --thermal-preset KEY       ni | py | fgt | fgt-zhou | yig | cofeb (default fgt)");
     eprintln!("  --t-ambient K              ambient bath temperature (default 300)");

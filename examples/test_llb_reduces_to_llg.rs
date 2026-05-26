@@ -70,7 +70,10 @@ fn main() {
         "LLG avg_mz end = {:.6}, LLB avg_mz end = {:.6}",
         llg_end, llb_end
     );
-    println!("max |LLG - LLB| avg_mz = {:.3e} at step {}", max_abs, at_step);
+    println!(
+        "max |LLG - LLB| avg_mz = {:.3e} at step {}",
+        max_abs, at_step
+    );
 
     // The uniform +z init has no in-plane component to precess and both
     // integrators preserve it. Agreement should be to float precision.
@@ -79,5 +82,8 @@ fn main() {
         "LLB does NOT reduce to LLG at T=0K: max diff {:.3e}",
         max_abs
     );
-    println!("PASS: LLB reduces to LLG at T=0K, max |Δavg_mz| = {:.3e}", max_abs);
+    println!(
+        "PASS: LLB reduces to LLG at T=0K, max |Δavg_mz| = {:.3e}",
+        max_abs
+    );
 }

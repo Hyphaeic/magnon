@@ -9,10 +9,18 @@ fn main() {
     let fgt = BulkMaterial::fgt_bulk();
     let stack = Stack {
         layers: vec![
-            Layer { material: fgt.clone(), thickness: 0.7e-9, u_axis: [0.0, 0.0, 1.0] },
-            Layer { material: fgt.clone(), thickness: 0.7e-9, u_axis: [0.0, 0.0, 1.0] },
+            Layer {
+                material: fgt.clone(),
+                thickness: 0.7e-9,
+                u_axis: [0.0, 0.0, 1.0],
+            },
+            Layer {
+                material: fgt.clone(),
+                thickness: 0.7e-9,
+                u_axis: [0.0, 0.0, 1.0],
+            },
         ],
-        interlayer_a: vec![0.0],        // ZERO interlayer coupling
+        interlayer_a: vec![0.0], // ZERO interlayer coupling
         layer_spacing: vec![0.5e-9],
     };
 

@@ -42,8 +42,16 @@ fn run(label: &'static str, skin_depth_m: f64) -> PerLayerPeak {
     let mut bulk_with_alpha = bulk;
     bulk_with_alpha.alpha_bulk = preset.alpha_0;
     let layers = vec![
-        Layer { material: bulk_with_alpha.clone(), thickness: 20e-9, u_axis: [0.0, 0.0, 1.0] },
-        Layer { material: bulk_with_alpha,         thickness: 20e-9, u_axis: [0.0, 0.0, 1.0] },
+        Layer {
+            material: bulk_with_alpha.clone(),
+            thickness: 20e-9,
+            u_axis: [0.0, 0.0, 1.0],
+        },
+        Layer {
+            material: bulk_with_alpha,
+            thickness: 20e-9,
+            u_axis: [0.0, 0.0, 1.0],
+        },
     ];
     let stack = Stack {
         layers,
@@ -55,7 +63,11 @@ fn run(label: &'static str, skin_depth_m: f64) -> PerLayerPeak {
         stack,
         substrate: Substrate::vacuum(),
         // 1×1 in-plane × 2 layers ⇒ 2 cells, one per layer.
-        geometry: Geometry { nx: 1, ny: 1, cell_size: 20e-9 },
+        geometry: Geometry {
+            nx: 1,
+            ny: 1,
+            cell_size: 20e-9,
+        },
         dt: 1.0e-15,
         b_ext: [0.0, 0.0, 0.0],
         stab_coeff: 0.0,
@@ -66,9 +78,9 @@ fn run(label: &'static str, skin_depth_m: f64) -> PerLayerPeak {
         probe_idx: None,
         probe_layer: None,
     };
-    cfg.photonic.pulses.push(
-        parse_pulse_spec("t=300fs,fwhm=100fs,peak=0.0,dir=z,fluence=1.0,R=0.0").unwrap(),
-    );
+    cfg.photonic
+        .pulses
+        .push(parse_pulse_spec("t=300fs,fwhm=100fs,peak=0.0,dir=z,fluence=1.0,R=0.0").unwrap());
     cfg.photonic.thermal = Some(ThermalConfig {
         t_ambient: 300.0,
         per_layer: vec![preset.clone(); 2],
@@ -88,8 +100,12 @@ fn run(label: &'static str, skin_depth_m: f64) -> PerLayerPeak {
         // Cell layout: layer-flat. cell[0] = layer 0 (bottom), cell[1] = layer 1 (top).
         let bot = te[0];
         let top = te[1];
-        if bot > bot_peak { bot_peak = bot; }
-        if top > top_peak { top_peak = top; }
+        if bot > bot_peak {
+            bot_peak = bot;
+        }
+        if top > top_peak {
+            top_peak = top;
+        }
     }
     PerLayerPeak {
         label,

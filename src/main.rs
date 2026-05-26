@@ -11,15 +11,16 @@ fn apply_benchmark(cfg: &mut SimConfig, name: &str) -> Result<(), String> {
         "beaurepaire-ni" => {
             // 20 nm Ni-like, 100 fs FWHM, 7 mJ/cm² absorbed, T_amb=300 K.
             let preset = material_thermal::ni_m3tm();
-            let mut stack = Stack::monolayer(
-                BulkMaterial::permalloy_bulk(),
-                20e-9,
-                [0.0, 0.0, 1.0],
-            );
+            let mut stack =
+                Stack::monolayer(BulkMaterial::permalloy_bulk(), 20e-9, [0.0, 0.0, 1.0]);
             stack.layers[0].material.alpha_bulk = preset.alpha_0;
             cfg.stack = stack;
             cfg.substrate = Substrate::vacuum();
-            cfg.geometry = Geometry { nx: 1, ny: 1, cell_size: 20e-9 };
+            cfg.geometry = Geometry {
+                nx: 1,
+                ny: 1,
+                cell_size: 20e-9,
+            };
             cfg.dt = 1.0e-15;
             cfg.b_ext = [0.0, 0.0, 0.0];
             cfg.j_current = [0.0, 0.0, 0.0];
@@ -40,7 +41,11 @@ fn apply_benchmark(cfg: &mut SimConfig, name: &str) -> Result<(), String> {
         "mumag-sp4-proxy" => {
             // Deterministic skyrmion on fgt_default + 10 mT transverse bias;
             // both LLG and LLB-at-T=0 paths should match.
-            cfg.geometry = Geometry { nx: 32, ny: 32, cell_size: 2.5e-9 };
+            cfg.geometry = Geometry {
+                nx: 32,
+                ny: 32,
+                cell_size: 2.5e-9,
+            };
             cfg.dt = 1.0e-14;
             cfg.b_ext = [0.01, 0.0, 0.0];
             cfg.total_steps = 2_000;
@@ -60,7 +65,9 @@ fn apply_benchmark(cfg: &mut SimConfig, name: &str) -> Result<(), String> {
             std::env::set_var("MAGNONIC_SKYRMION_R_NM", "12");
             Ok(())
         }
-        other => Err(format!("unknown benchmark '{other}' — try 'beaurepaire-ni' or 'mumag-sp4-proxy'")),
+        other => Err(format!(
+            "unknown benchmark '{other}' — try 'beaurepaire-ni' or 'mumag-sp4-proxy'"
+        )),
     }
 }
 
@@ -75,7 +82,9 @@ fn parse_stack(spec: &str) -> Result<Vec<Layer>, String> {
                 ));
             }
             let name = parts[0].trim();
-            let thickness_nm: f64 = parts[1].trim().parse()
+            let thickness_nm: f64 = parts[1]
+                .trim()
+                .parse()
                 .map_err(|e| format!("Bad thickness in '{entry}': {e}"))?;
             let material = BulkMaterial::lookup(name)
                 .ok_or_else(|| format!("Unknown material '{name}' — see --list-materials"))?;
@@ -95,6 +104,31 @@ fn parse_f64_list(s: &str) -> Result<Vec<f64>, String> {
         .collect()
 }
 
+fn default_thermal_config(layer_count: usize, enable_llb: bool) -> ThermalConfig {
+    ThermalConfig {
+        t_ambient: 300.0,
+        per_layer: vec![material_thermal::fgt_ni_surrogate(); layer_count],
+        thermal_dt_cap: 1.0e-15,
+        thermal_window: (0.5e-12, 10.0e-12),
+        enable_llb,
+    }
+}
+
+fn ensure_thermal_layers(config: &mut SimConfig) {
+    let Some(thermal) = config.photonic.thermal.as_mut() else {
+        return;
+    };
+    let layer_count = config.stack.layers.len();
+    if thermal.per_layer.is_empty() {
+        thermal.per_layer = vec![material_thermal::fgt_ni_surrogate(); layer_count];
+        eprintln!("Thermal preset: defaulting to fgt-ni-surrogate for all layers");
+    } else if thermal.per_layer.len() != layer_count {
+        let first = thermal.per_layer[0].clone();
+        thermal.per_layer.resize(layer_count, first);
+        eprintln!("Thermal preset count adjusted to match stack layer count ({layer_count})");
+    }
+}
+
 fn main() {
     env_logger::init();
 
@@ -104,8 +138,14 @@ fn main() {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--nx" => { config.geometry.nx = args[i + 1].parse().unwrap(); i += 2; }
-            "--ny" => { config.geometry.ny = args[i + 1].parse().unwrap(); i += 2; }
+            "--nx" => {
+                config.geometry.nx = args[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--ny" => {
+                config.geometry.ny = args[i + 1].parse().unwrap();
+                i += 2;
+            }
             "--thickness" => {
                 // Sets thickness of the FIRST layer (backward compat).
                 // For multilayer, use --stack (M3).
@@ -121,7 +161,9 @@ fn main() {
             "--material" => {
                 let name = &args[i + 1];
                 match BulkMaterial::lookup(name) {
-                    Some(m) => { config.stack.layers[0].material = m; }
+                    Some(m) => {
+                        config.stack.layers[0].material = m;
+                    }
                     None => {
                         eprintln!("Unknown material: {name}. Use --list-materials to see options.");
                         std::process::exit(1);
@@ -132,9 +174,13 @@ fn main() {
             "--substrate" => {
                 let name = &args[i + 1];
                 match Substrate::lookup(name) {
-                    Some(s) => { config.substrate = s; }
+                    Some(s) => {
+                        config.substrate = s;
+                    }
                     None => {
-                        eprintln!("Unknown substrate: {name}. Use --list-substrates to see options.");
+                        eprintln!(
+                            "Unknown substrate: {name}. Use --list-substrates to see options."
+                        );
                         std::process::exit(1);
                     }
                 }
@@ -165,13 +211,17 @@ fn main() {
                         if vals.len() != expected {
                             eprintln!(
                                 "--interlayer-a has {} values, expected {} (N_layers - 1)",
-                                vals.len(), expected
+                                vals.len(),
+                                expected
                             );
                             std::process::exit(1);
                         }
                         config.stack.interlayer_a = vals;
                     }
-                    Err(e) => { eprintln!("--interlayer-a parse error: {e}"); std::process::exit(1); }
+                    Err(e) => {
+                        eprintln!("--interlayer-a parse error: {e}");
+                        std::process::exit(1);
+                    }
                 }
                 i += 2;
             }
@@ -183,13 +233,17 @@ fn main() {
                         if vals_nm.len() != expected {
                             eprintln!(
                                 "--layer-spacing has {} values, expected {} (N_layers - 1)",
-                                vals_nm.len(), expected
+                                vals_nm.len(),
+                                expected
                             );
                             std::process::exit(1);
                         }
                         config.stack.layer_spacing = vals_nm.iter().map(|nm| nm * 1e-9).collect();
                     }
-                    Err(e) => { eprintln!("--layer-spacing parse error: {e}"); std::process::exit(1); }
+                    Err(e) => {
+                        eprintln!("--layer-spacing parse error: {e}");
+                        std::process::exit(1);
+                    }
                 }
                 i += 2;
             }
@@ -199,7 +253,9 @@ fn main() {
             }
             "--pulse" => {
                 match parse_pulse_spec(&args[i + 1]) {
-                    Ok(pulse) => { config.photonic.pulses.push(pulse); }
+                    Ok(pulse) => {
+                        config.photonic.pulses.push(pulse);
+                    }
                     Err(e) => {
                         eprintln!("--pulse parse error: {e}");
                         std::process::exit(1);
@@ -208,25 +264,36 @@ fn main() {
                 i += 2;
             }
             "--enable-thermal" => {
-                // Start with a minimal default ThermalConfig; per-layer
-                // presets must be supplied via --thermal-params-for.
                 if config.photonic.thermal.is_none() {
-                    config.photonic.thermal = Some(ThermalConfig::default());
+                    config.photonic.thermal =
+                        Some(default_thermal_config(config.stack.layers.len(), false));
                 }
                 i += 1;
             }
             "--enable-llb" => {
-                let t = config.photonic.thermal.get_or_insert_with(ThermalConfig::default);
+                if config.photonic.thermal.is_none() {
+                    config.photonic.thermal =
+                        Some(default_thermal_config(config.stack.layers.len(), true));
+                }
+                let t = config.photonic.thermal.as_mut().unwrap();
                 t.enable_llb = true;
                 i += 1;
             }
             "--t-ambient" => {
-                let t = config.photonic.thermal.get_or_insert_with(ThermalConfig::default);
+                if config.photonic.thermal.is_none() {
+                    config.photonic.thermal =
+                        Some(default_thermal_config(config.stack.layers.len(), false));
+                }
+                let t = config.photonic.thermal.as_mut().unwrap();
                 t.t_ambient = args[i + 1].parse().unwrap();
                 i += 2;
             }
             "--thermal-dt-cap" => {
-                let t = config.photonic.thermal.get_or_insert_with(ThermalConfig::default);
+                if config.photonic.thermal.is_none() {
+                    config.photonic.thermal =
+                        Some(default_thermal_config(config.stack.layers.len(), false));
+                }
+                let t = config.photonic.thermal.as_mut().unwrap();
                 t.thermal_dt_cap = args[i + 1].parse().unwrap();
                 i += 2;
             }
@@ -247,7 +314,11 @@ fn main() {
                         std::process::exit(1);
                     }
                 };
-                let t = config.photonic.thermal.get_or_insert_with(ThermalConfig::default);
+                if config.photonic.thermal.is_none() {
+                    config.photonic.thermal =
+                        Some(default_thermal_config(config.stack.layers.len(), false));
+                }
+                let t = config.photonic.thermal.as_mut().unwrap();
                 let n_layers = config.stack.layers.len();
                 t.per_layer = vec![preset; n_layers];
                 i += 2;
@@ -268,8 +339,14 @@ fn main() {
                 }
                 std::process::exit(0);
             }
-            "--steps" => { config.total_steps = args[i + 1].parse().unwrap(); i += 2; }
-            "--interval" => { config.readback_interval = args[i + 1].parse().unwrap(); i += 2; }
+            "--steps" => {
+                config.total_steps = args[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--interval" => {
+                config.readback_interval = args[i + 1].parse().unwrap();
+                i += 2;
+            }
             "--alpha" => {
                 // Overrides bulk damping (post-lookup)
                 // Overrides alpha of the first layer's bulk material
@@ -303,18 +380,39 @@ fn main() {
                 config.substrate.d_dmi_surface = d;
                 i += 2;
             }
-            "--bx" => { config.b_ext[0] = args[i + 1].parse().unwrap(); i += 2; }
-            "--by" => { config.b_ext[1] = args[i + 1].parse().unwrap(); i += 2; }
-            "--bz" => { config.b_ext[2] = args[i + 1].parse().unwrap(); i += 2; }
-            "--jx" => { config.j_current[0] = args[i + 1].parse().unwrap(); i += 2; }
-            "--jy" => { config.j_current[1] = args[i + 1].parse().unwrap(); i += 2; }
-            "--jz" => { config.j_current[2] = args[i + 1].parse().unwrap(); i += 2; }
+            "--bx" => {
+                config.b_ext[0] = args[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--by" => {
+                config.b_ext[1] = args[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--bz" => {
+                config.b_ext[2] = args[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--jx" => {
+                config.j_current[0] = args[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--jy" => {
+                config.j_current[1] = args[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--jz" => {
+                config.j_current[2] = args[i + 1].parse().unwrap();
+                i += 2;
+            }
             "--theta-sh" => {
                 // Override substrate spin Hall angle
                 config.substrate.spin_hall_angle = args[i + 1].parse().unwrap();
                 i += 2;
             }
-            "--dt" => { config.dt = args[i + 1].parse().unwrap(); i += 2; }
+            "--dt" => {
+                config.dt = args[i + 1].parse().unwrap();
+                i += 2;
+            }
             "--help" | "-h" => {
                 eprintln!("magnonic-sim [options]");
                 eprintln!();
@@ -335,20 +433,40 @@ fn main() {
                 eprintln!();
                 eprintln!("Conditions:");
                 eprintln!("  --bx F / --by F / --bz F   External field components [T]");
-                eprintln!("  --jx F / --jy F / --jz F   Charge current [A/m²] (SOT drive of layer 0)");
+                eprintln!(
+                    "  --jx F / --jy F / --jz F   Charge current [A/m²] (SOT drive of layer 0)"
+                );
                 eprintln!("  --dt F              Timestep [s] (default 1e-14)");
-                eprintln!("  --init MODE         uniform | random | stripe | skyrmion | alternating");
+                eprintln!(
+                    "  --init MODE         uniform | random | stripe | skyrmion | alternating"
+                );
                 eprintln!();
                 eprintln!("Photonic drive (Phase P1-P2 — IFE laser pulses):");
                 eprintln!("  --pulse \"t=T,fwhm=W,peak=B,dir=D[,x=X,y=Y,sigma=S]\"");
-                eprintln!("                      Laser pulse: t = center time (ps default, or fs/ns/s),");
+                eprintln!(
+                    "                      Laser pulse: t = center time (ps default, or fs/ns/s),"
+                );
                 eprintln!("                      fwhm = FWHM duration (fs default), peak = IFE field [T],");
                 eprintln!("                      dir = x/y/z/-x/-y/-z or 'a,b,c' 3-vec.");
-                eprintln!("                      Optional spatial (P2): x, y = spot center [nm default,");
-                eprintln!("                      accepts um/mm/m suffix], sigma = 1-σ beam radius.");
+                eprintln!(
+                    "                      Optional spatial (P2): x, y = spot center [nm default,"
+                );
+                eprintln!(
+                    "                      accepts um/mm/m suffix], sigma = 1-σ beam radius."
+                );
                 eprintln!("                      Omit spatial keys or set sigma=0 for uniform illumination.");
                 eprintln!("                      Max 4 pulses. Example (focused):");
                 eprintln!("                      \"t=1ps,fwhm=100fs,peak=0.5T,dir=z,x=40nm,y=40nm,sigma=25nm\"");
+                eprintln!();
+                eprintln!("Thermal / LLB:");
+                eprintln!("  --enable-thermal       Attach ThermalConfig (default preset fgt)");
+                eprintln!(
+                    "  --enable-llb           Engage LLB integrator (implies --enable-thermal)"
+                );
+                eprintln!("  --thermal-params-for KEY");
+                eprintln!("                         ni | py | fgt | fgt-zhou | yig | cofeb");
+                eprintln!("  --t-ambient K          Ambient bath temperature [K]");
+                eprintln!("  --thermal-dt-cap F     Enforced thermal substep cap [s]");
                 eprintln!();
                 eprintln!("Material overrides (apply to first layer post-lookup):");
                 eprintln!("  --alpha F           Bulk Gilbert damping");
@@ -379,6 +497,8 @@ fn main() {
         }
     }
 
+    ensure_thermal_layers(&mut config);
+
     config.print_summary();
     config.effective().print_sot(config.j_current);
 
@@ -387,22 +507,38 @@ fn main() {
     // Handle --init flag
     if let Ok(init_mode) = std::env::var("MAGNONIC_INIT") {
         match init_mode.as_str() {
-            "random" => { solver.reset_random(); eprintln!("INIT: random unit vectors"); }
-            "stripe" => { solver.reset_stripe_domains(8); eprintln!("INIT: stripe domains"); }
-            "uniform" => { solver.reset_uniform_z(); eprintln!("INIT: uniform +z + 5° cone"); }
+            "random" => {
+                solver.reset_random();
+                eprintln!("INIT: random unit vectors");
+            }
+            "stripe" => {
+                solver.reset_stripe_domains(8);
+                eprintln!("INIT: stripe domains");
+            }
+            "uniform" => {
+                solver.reset_uniform_z();
+                eprintln!("INIT: uniform +z + 5° cone");
+            }
             "alternating" => {
                 solver.reset_uniform_z_alternating();
                 eprintln!("INIT: alternating +z/-z per layer (synthetic AFM)");
             }
             "skyrmion" => {
                 let default_r = (config.geometry.nx.min(config.geometry.ny) as f64)
-                    * config.geometry.cell_size * 1e9 / 6.0;
+                    * config.geometry.cell_size
+                    * 1e9
+                    / 6.0;
                 let r_nm: f64 = std::env::var("MAGNONIC_SKYRMION_R_NM")
-                    .ok().and_then(|s| s.parse().ok()).unwrap_or(default_r);
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(default_r);
                 solver.reset_skyrmion_seed(r_nm);
                 eprintln!("INIT: Néel skyrmion seed, R = {r_nm:.1} nm");
             }
-            other => { eprintln!("Unknown --init mode: {other}"); std::process::exit(1); }
+            other => {
+                eprintln!("Unknown --init mode: {other}");
+                std::process::exit(1);
+            }
         }
     }
 
@@ -425,8 +561,12 @@ fn main() {
             let steps_per_sec = steps_done as f64 / elapsed;
             eprintln!(
                 "[{}/{}] {:.0} steps/s | avg_mz={:.4} | |m| in [{:.6}, {:.6}]",
-                steps_done, config.total_steps, steps_per_sec,
-                obs.avg_mz, obs.min_norm, obs.max_norm,
+                steps_done,
+                config.total_steps,
+                steps_per_sec,
+                obs.avg_mz,
+                obs.min_norm,
+                obs.max_norm,
             );
         }
     }

@@ -111,8 +111,8 @@ Used in: [`equations.md`](equations.md) §3.
 - **Leliaert, J.; Mulkers, J.; De Clercq, J.; Coene, A.; Dvornik, M.;
   Van Waeyenberge, B.** "Adaptively time stepping the stochastic
   Landau-Lifshitz-Gilbert equation at non-zero temperature." *AIP
-  Advances* 7, 125010 (2017). Informs the (currently advisory)
-  `thermal_dt_cap` field.
+  Advances* 7, 125010 (2017). Background for timestep control in
+  finite-temperature LLG/LLB integration.
 
 Used in: [`equations.md`](equations.md) §1.2 and §4.
 
@@ -145,8 +145,8 @@ Used in: [`equations.md`](equations.md) §1.2 and §4.
   [URL](https://academic.oup.com/nsr/article/12/7/nwaf185/8142530).
   **Calibration target**: 79 % demag at 22.2 ps under (T = T_c =
   210 K, B = 1 T, F = 0.24 mJ/cm², 150 fs FWHM, 5 nm flake). The
-  fit lives in `material_thermal::fgt_zhou_calibrated()`. ADR-006
-  documents the recalibration after F1+F2+F3.
+  fit lives in `material_thermal::fgt_zhou_calibrated()`. The current
+  recalibration procedure is documented in [`calibration.md`](calibration.md).
 
 Used in: `BulkMaterial::fgt_bulk`, `LayerThermalParams::fgt_*`,
 [`calibration.md`](calibration.md).
@@ -292,7 +292,7 @@ Used in: README motivation; not directly consumed by the model.
   https://www.ctcms.nist.gov/~rdm/mumag.org.html. Standard demag-
   inclusive LLG benchmark. Not literally implementable here without a
   demagnetisation field; replaced by a deterministic LLG-vs-LLB
-  proxy. ADR-004 documents the substitution.
+  proxy.
 
 - **Heun's method** (predictor-corrector, second-order) is textbook;
   no specific reference used. The projected variant (post-stage
@@ -307,20 +307,13 @@ Used in: README motivation; not directly consumed by the model.
 
 ---
 
-## 10. ADR-internal references
+## 10. Historical ADR Notes
 
-The decision records in `branches/hir/decisions/ADR-001..006`
-reference each other and several papers above. Key ADR ↔ reference
-pairs:
-
-| ADR | Topic | Key external reference |
-|---|---|---|
-| 001 | `fgt_bulk` as default preset | Leon-Brito 2016 (§4.1) |
-| 002 | Stack-order is first-class | none external |
-| 003 | P3a/P3b GPU layout deviations | none external |
-| 004 | µMAG SP4 substitution | µMAG SP4 spec (§9) |
-| 005 | Original FGT calibration (T = 150 K) | Zhou 2025 (§4.1) |
-| 006 | FGT recalibration at literal T = T_c | Zhou 2025; supersedes ADR-005 |
+Some source comments still mention internal ADR numbers from earlier
+development phases. Those decision records are not included in this checkout;
+the auditable public documentation for the current model is
+[`physics.md`](physics.md), [`equations.md`](equations.md), and
+[`calibration.md`](calibration.md).
 
 ---
 

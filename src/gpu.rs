@@ -62,7 +62,7 @@ struct GpuParams {
 
     // 16-31: dynamics
     dt: f32,
-    gamma: f32,
+    gamma: f32, // legacy first-layer gamma; per-layer dynamics use layer_gammas
     stab_coeff: f32,
     // cell_size in meters (in-plane dx = dy). Needed by the shader for
     // computing cell positions during the per-pulse Gaussian-weight sum.
@@ -177,17 +177,25 @@ struct GpuParams {
     //   Beer-Lambert  (skin_depth > 0): factor = (∏_{j above} exp(-t_j/δ_j))
     //                                          · (1 − exp(-t_i/δ_i)) / t_i
     layer_optical_atten: [f32; 4],
+    // 736-751: per-layer gyromagnetic ratio [rad/(s·T)].
+    layer_gammas: [f32; 4],
 }
 
 const OFFSET_PULSE_AMPLITUDES: u64 = 400;
-const OFFSET_GPUPARAMS_END: u64 = 736;
+const OFFSET_DT: u64 = 16;
+const OFFSET_GPUPARAMS_END: u64 = 752;
 const _: () = assert!(OFFSET_GPUPARAMS_END as usize == std::mem::size_of::<GpuParams>());
 
 impl GpuParams {
     fn from_config(cfg: &SimConfig) -> Self {
         let eff = cfg.effective();
         let nz = cfg.nz() as usize;
-        assert!(nz <= MAX_LAYERS, "Stack has {} layers; MAX_LAYERS = {}", nz, MAX_LAYERS);
+        assert!(
+            nz <= MAX_LAYERS,
+            "Stack has {} layers; MAX_LAYERS = {}",
+            nz,
+            MAX_LAYERS
+        );
 
         let mut layer_alphas = [0.0f32; 4];
         let mut layer_exchange_pfs = [0.0f32; 4];
@@ -196,14 +204,15 @@ impl GpuParams {
         let mut layer_sot_tau_dls = [0.0f32; 4];
         let mut layer_sot_tau_fls = [0.0f32; 4];
         let mut layer_thicknesses = [0.0f32; 4];
+        let mut layer_gammas = [0.0f32; 4];
         let mut layer_u_axes = [[0.0f32; 4]; MAX_LAYERS];
         let mut layer_b_biases = [[0.0f32; 4]; MAX_LAYERS];
         let mut layer_sigmas = [[0.0f32; 4]; MAX_LAYERS];
 
         for (i, l) in eff.layers.iter().enumerate() {
             layer_alphas[i] = l.alpha as f32;
-            layer_exchange_pfs[i] =
-                eff.exchange_prefactor(i, cfg.geometry.cell_size) as f32;
+            layer_gammas[i] = l.gamma as f32;
+            layer_exchange_pfs[i] = eff.exchange_prefactor(i, cfg.geometry.cell_size) as f32;
             layer_anisotropy_pfs[i] = eff.anisotropy_prefactor(i) as f32;
             layer_dmi_pfs[i] = eff.dmi_prefactor(i, cfg.geometry.cell_size) as f32;
 
@@ -225,7 +234,10 @@ impl GpuParams {
             layer_u_axes[i] = [ax as f32, ay as f32, az as f32, 0.0];
 
             layer_b_biases[i] = [
-                l.b_bias[0] as f32, l.b_bias[1] as f32, l.b_bias[2] as f32, 0.0,
+                l.b_bias[0] as f32,
+                l.b_bias[1] as f32,
+                l.b_bias[2] as f32,
+                0.0,
             ];
         }
 
@@ -249,7 +261,12 @@ impl GpuParams {
             gamma: gamma as f32,
             stab_coeff: cfg.stab_coeff as f32,
             cell_size_m: cfg.geometry.cell_size as f32,
-            b_ext: [cfg.b_ext[0] as f32, cfg.b_ext[1] as f32, cfg.b_ext[2] as f32, 0.0],
+            b_ext: [
+                cfg.b_ext[0] as f32,
+                cfg.b_ext[1] as f32,
+                cfg.b_ext[2] as f32,
+                0.0,
+            ],
             layer_alphas,
             layer_exchange_pfs,
             layer_anisotropy_pfs,
@@ -266,17 +283,17 @@ impl GpuParams {
             pulse_count: {
                 let n = cfg.photonic.pulses.len();
                 if n > 4 {
-                    eprintln!(
-                        "WARNING: {n} pulses specified but MAX_PULSES = 4; ignoring extras",
-                    );
+                    eprintln!("WARNING: {n} pulses specified but MAX_PULSES = 4; ignoring extras",);
                 }
                 n.min(4) as u32
             },
-            enable_llb_flag: cfg
-                .photonic
-                .thermal
-                .as_ref()
-                .map_or(0, |t| if t.enable_llb { 1 } else { 0 }),
+            enable_llb_flag: cfg.photonic.thermal.as_ref().map_or(0, |t| {
+                if t.enable_llb {
+                    1
+                } else {
+                    0
+                }
+            }),
             _pad_pc1: 0,
             _pad_pc2: 0,
             // Amplitudes start at 0; host writes them per step from envelope
@@ -321,6 +338,7 @@ impl GpuParams {
             layer_thermal_b_max: Self::thermal_vec4(cfg, |p| p.b_max_t as f32),
             layer_thermal_tau_fast: Self::thermal_vec4(cfg, |p| p.tau_fast_base as f32),
             layer_optical_atten: Self::compute_optical_atten(cfg),
+            layer_gammas,
         }
     }
 
@@ -411,9 +429,17 @@ impl std::fmt::Display for Observables {
         write!(
             f,
             "{},{:.4},{:.6},{:.6},{:.6},{:.8},{:.8},{:.6},{:.2},{:.2},{:.6}",
-            self.step, self.time_ps, self.avg_mx, self.avg_my, self.avg_mz,
-            self.min_norm, self.max_norm, self.probe_mz,
-            self.max_t_e, self.max_t_p, self.min_m_reduced,
+            self.step,
+            self.time_ps,
+            self.avg_mx,
+            self.avg_my,
+            self.avg_mz,
+            self.min_norm,
+            self.max_norm,
+            self.probe_mz,
+            self.max_t_e,
+            self.max_t_p,
+            self.min_m_reduced,
         )
     }
 }
@@ -451,7 +477,7 @@ pub struct GpuSolver {
     // Table buffers are bound through `bind_group`; no direct writes after
     // creation. Hence the `_` prefix. `chi_par_table` is currently unused
     // by the shader but retained for a future full-Atxitia LLB upgrade —
-    // see docs/zhou_fgt_calibration.md §6.
+    // see docs/physics.md §6.3.
     _m_e_table_buf: wgpu::Buffer,
     _chi_par_table_buf: wgpu::Buffer,
 
@@ -481,6 +507,20 @@ pub struct GpuSolver {
 }
 
 impl GpuSolver {
+    fn validate_thermal_config(config: &SimConfig) -> Result<(), String> {
+        let Some(thermal) = &config.photonic.thermal else {
+            return Ok(());
+        };
+        let nz = config.nz() as usize;
+        if thermal.per_layer.len() < nz {
+            return Err(format!(
+                "thermal is enabled but only {} per-layer preset(s) were provided for {nz} layer(s); pass --thermal-params-for/--thermal-preset or attach one preset per layer",
+                thermal.per_layer.len()
+            ));
+        }
+        Ok(())
+    }
+
     /// Create solver with its own GPU device (headless mode).
     pub fn new(config: &SimConfig) -> Result<Self, String> {
         config.stack.validate()?;
@@ -501,14 +541,12 @@ impl GpuSolver {
         limits.max_storage_buffers_per_shader_stage =
             limits.max_storage_buffers_per_shader_stage.max(16);
 
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("magnonic-llg"),
-                required_features: wgpu::Features::empty(),
-                required_limits: limits,
-                ..Default::default()
-            },
-        ))
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("magnonic-llg"),
+            required_features: wgpu::Features::empty(),
+            required_limits: limits,
+            ..Default::default()
+        }))
         .map_err(|e| format!("Failed to create device: {e}"))?;
 
         Self::from_device_queue(Arc::new(device), Arc::new(queue), config)
@@ -520,6 +558,7 @@ impl GpuSolver {
         config: &SimConfig,
     ) -> Result<Self, String> {
         config.stack.validate()?;
+        Self::validate_thermal_config(config)?;
 
         let cell_count = config.cell_count();
         let buf_bytes = (cell_count as u64) * 4 * 4; // 4 f32 per cell
@@ -537,7 +576,9 @@ impl GpuSolver {
         let mag_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mag"),
             contents: bytemuck::cast_slice(&mag_data),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
         });
 
         let zeros = vec![0.0f32; (cell_count * 4) as usize];
@@ -575,7 +616,7 @@ impl GpuSolver {
 
         // ─── Phase P3 thermal buffers ─────────────────────────────────
         let scalar_bytes = (cell_count as u64) * 4; // 1 f32 per cell
-        let table_bytes = (MAX_LAYERS * LLB_TABLE_N * 4) as u64;
+        let table_bytes = (MAX_LAYERS * LLB_TABLE_N * LLB_TABLE_N_B * 4) as u64;
 
         let thermal = config.photonic.thermal.as_ref();
         let t_ambient = thermal.map(|t| t.t_ambient).unwrap_or(300.0);
@@ -584,12 +625,16 @@ impl GpuSolver {
         let temp_e_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("temp_e"),
             contents: bytemuck::cast_slice(&init_temp),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
         });
         let temp_p_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("temp_p"),
             contents: bytemuck::cast_slice(&init_temp),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
         });
 
         // Initialize m_reduced and m_target per-cell at m_e(T_ambient, |B_z|).
@@ -613,12 +658,16 @@ impl GpuSolver {
         let m_reduced_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("m_reduced"),
             contents: bytemuck::cast_slice(&m_init),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
         });
         let m_target_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("m_target"),
             contents: bytemuck::cast_slice(&m_init),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
         });
 
         // Pack m_e / χ_∥ tables: row-major [layer][row].
@@ -715,18 +764,54 @@ impl GpuSolver {
             label: Some("llg_bg"),
             layout: &bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: params_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: mag_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: mag_pred_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: h_eff_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: torque_0_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: torque_1_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 6, resource: temp_e_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 7, resource: temp_p_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 8, resource: m_reduced_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 9, resource: m_e_table_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 10, resource: chi_par_table_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 11, resource: m_target_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: mag_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: mag_pred_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: h_eff_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: torque_0_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: torque_1_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: temp_e_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: temp_p_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: m_reduced_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: m_e_table_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: chi_par_table_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: m_target_buf.as_entire_binding(),
+                },
             ],
         });
 
@@ -840,88 +925,147 @@ impl GpuSolver {
         // density [W/m³]. ADR-003 documents the reuse of the direction-
         // vec4 w-component.
         let n_pulses = self.config.photonic.pulses.len().min(4);
+        let enable_llb = self
+            .config
+            .photonic
+            .thermal
+            .as_ref()
+            .map_or(false, |t| t.enable_llb);
+        let thermal_dt_cap = self
+            .config
+            .photonic
+            .thermal
+            .as_ref()
+            .map(|t| t.thermal_dt_cap)
+            .filter(|cap| cap.is_finite() && *cap > 0.0);
+        let max_sub_dt = if has_thermal {
+            thermal_dt_cap
+                .map(|cap| cap.min(self.config.dt))
+                .unwrap_or(self.config.dt)
+        } else {
+            self.config.dt
+        };
+        let mut params_dt_is_config_dt = true;
         for _ in 0..n {
-            let dt = self.config.dt;
-            let t_mid = self.t_sim + 0.5 * dt;
-            let mut amps = [0.0f32; 4];
-            for (i, pulse) in self.config.photonic.pulses.iter().take(n_pulses).enumerate() {
-                let env = pulse.envelope_at(t_mid);
-                amps[i] = (pulse.peak_field as f64 * env) as f32;
-            }
-            self.queue.write_buffer(
-                &self.params_buf,
-                OFFSET_PULSE_AMPLITUDES,
-                bytemuck::cast_slice(&amps),
-            );
-
-            if has_thermal {
-                // Rewrite pulse_directions[p].w per step with instantaneous
-                // absorbed power density. For pulses without `peak_fluence`
-                // we still overwrite with 0.0 so the M3TM kernel sees no
-                // source from that pulse.
-                let sigma_t = |fwhm: f64| fwhm / 2.354_820_045;
-                let tau = (2.0 * std::f64::consts::PI).sqrt();
-                for (i, pulse) in self.config.photonic.pulses.iter().take(n_pulses).enumerate() {
-                    let env = pulse.envelope_at(t_mid);
-                    let p_w = match pulse.peak_fluence {
-                        Some(f) => {
-                            let sig = sigma_t(pulse.duration_fwhm).max(1e-18);
-                            // F3: shader applies the per-layer 1/m attenuation factor.
-                            (1.0 - pulse.reflectivity as f64) * f / (tau * sig) * env
-                        }
-                        None => 0.0,
-                    } as f32;
-                    // pulse_directions layout: 4 vec4s at offset 480; each vec4 is
-                    // (x, y, z, w_power). Overwrite only the w-component each step
-                    // to avoid touching the unit direction vector.
-                    let offset_w = 480u64 + (i as u64) * 16 + 12;
-                    self.queue.write_buffer(&self.params_buf, offset_w, bytemuck::bytes_of(&p_w));
+            let mut remaining = self.config.dt;
+            while remaining > 1.0e-24 {
+                let dt = remaining.min(max_sub_dt);
+                remaining -= dt;
+                if (dt - self.config.dt).abs() > f64::EPSILON {
+                    let dt_f32 = dt as f32;
+                    self.queue.write_buffer(
+                        &self.params_buf,
+                        OFFSET_DT,
+                        bytemuck::bytes_of(&dt_f32),
+                    );
+                    params_dt_is_config_dt = false;
+                } else if !params_dt_is_config_dt {
+                    let dt_f32 = self.config.dt as f32;
+                    self.queue.write_buffer(
+                        &self.params_buf,
+                        OFFSET_DT,
+                        bytemuck::bytes_of(&dt_f32),
+                    );
+                    params_dt_is_config_dt = true;
                 }
+
+                let t_mid = self.t_sim + 0.5 * dt;
+                let mut amps = [0.0f32; 4];
+                for (i, pulse) in self
+                    .config
+                    .photonic
+                    .pulses
+                    .iter()
+                    .take(n_pulses)
+                    .enumerate()
+                {
+                    let env = pulse.envelope_at(t_mid);
+                    amps[i] = (pulse.peak_field as f64 * env) as f32;
+                }
+                self.queue.write_buffer(
+                    &self.params_buf,
+                    OFFSET_PULSE_AMPLITUDES,
+                    bytemuck::cast_slice(&amps),
+                );
+
+                if has_thermal {
+                    // Rewrite pulse_directions[p].w per substep with instantaneous
+                    // incident surface flux. For pulses without `peak_fluence`
+                    // we still overwrite with 0.0 so the M3TM kernel sees no
+                    // source from that pulse.
+                    let sigma_t = |fwhm: f64| fwhm / 2.354_820_045;
+                    let tau = (2.0 * std::f64::consts::PI).sqrt();
+                    for (i, pulse) in self
+                        .config
+                        .photonic
+                        .pulses
+                        .iter()
+                        .take(n_pulses)
+                        .enumerate()
+                    {
+                        let env = pulse.envelope_at(t_mid);
+                        let p_w = match pulse.peak_fluence {
+                            Some(f) => {
+                                let sig = sigma_t(pulse.duration_fwhm).max(1e-18);
+                                // F3: shader applies the per-layer 1/m attenuation factor.
+                                (1.0 - pulse.reflectivity as f64) * f / (tau * sig) * env
+                            }
+                            None => 0.0,
+                        } as f32;
+                        // pulse_directions layout: 4 vec4s at offset 480; each vec4 is
+                        // (x, y, z, w_power). Overwrite only the w-component each substep
+                        // to avoid touching the unit direction vector.
+                        let offset_w = 480u64 + (i as u64) * 16 + 12;
+                        self.queue.write_buffer(
+                            &self.params_buf,
+                            offset_w,
+                            bytemuck::bytes_of(&p_w),
+                        );
+                    }
+                }
+
+                let mut encoder = self.device.create_command_encoder(&Default::default());
+
+                // M3TM update first. If thermal_dt_cap < dt, this whole
+                // magnetisation/thermal update is substepped with the smaller dt.
+                if has_thermal {
+                    let mut p = encoder.begin_compute_pass(&Default::default());
+                    p.set_pipeline(&self.m3tm_pipeline);
+                    p.set_bind_group(0, &self.bind_group, &[]);
+                    p.dispatch_workgroups(wg, 1, 1);
+                }
+
+                let pipelines: [&wgpu::ComputePipeline; 4] = if enable_llb {
+                    [
+                        &self.ft_phase0_llb_pipeline,
+                        &self.llb_predict_pipeline,
+                        &self.ft_phase1_llb_pipeline,
+                        &self.llb_correct_pipeline,
+                    ]
+                } else {
+                    [
+                        &self.ft_phase0_pipeline,
+                        &self.predict_pipeline,
+                        &self.ft_phase1_pipeline,
+                        &self.correct_pipeline,
+                    ]
+                };
+                for pipeline in pipelines {
+                    let mut p = encoder.begin_compute_pass(&Default::default());
+                    p.set_pipeline(pipeline);
+                    p.set_bind_group(0, &self.bind_group, &[]);
+                    p.dispatch_workgroups(wg, 1, 1);
+                }
+                self.queue.submit(Some(encoder.finish()));
+
+                self.t_sim += dt;
             }
-
-            let mut encoder = self.device.create_command_encoder(&Default::default());
-
-            // M3TM update first (reads pulse_amplitudes and spot centers;
-            // writes temp_e, temp_p, m_reduced). In P3a the LLB path is not
-            // yet active — m_reduced evolves but LLG torque kernels don't
-            // read it, so cell |m| stays normalized (regression preserved).
-            if has_thermal {
-                let mut p = encoder.begin_compute_pass(&Default::default());
-                p.set_pipeline(&self.m3tm_pipeline);
-                p.set_bind_group(0, &self.bind_group, &[]);
-                p.dispatch_workgroups(wg, 1, 1);
-            }
-
-            let enable_llb = self.config
-                .photonic
-                .thermal
-                .as_ref()
-                .map_or(false, |t| t.enable_llb);
-            let pipelines: [&wgpu::ComputePipeline; 4] = if enable_llb {
-                [
-                    &self.ft_phase0_llb_pipeline,
-                    &self.llb_predict_pipeline,
-                    &self.ft_phase1_llb_pipeline,
-                    &self.llb_correct_pipeline,
-                ]
-            } else {
-                [
-                    &self.ft_phase0_pipeline,
-                    &self.predict_pipeline,
-                    &self.ft_phase1_pipeline,
-                    &self.correct_pipeline,
-                ]
-            };
-            for pipeline in pipelines {
-                let mut p = encoder.begin_compute_pass(&Default::default());
-                p.set_pipeline(pipeline);
-                p.set_bind_group(0, &self.bind_group, &[]);
-                p.dispatch_workgroups(wg, 1, 1);
-            }
-            self.queue.submit(Some(encoder.finish()));
-
             self.step += 1;
-            self.t_sim += dt;
+        }
+        if !params_dt_is_config_dt {
+            let dt_f32 = self.config.dt as f32;
+            self.queue
+                .write_buffer(&self.params_buf, OFFSET_DT, bytemuck::bytes_of(&dt_f32));
         }
     }
 
@@ -947,8 +1091,13 @@ impl GpuSolver {
         self.queue.submit(Some(encoder.finish()));
         let slice = staging.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
-        let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
         rx.recv().unwrap().unwrap();
         let data = slice.get_mapped_range();
         let out: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
@@ -960,16 +1109,23 @@ impl GpuSolver {
     pub fn readback_mag(&self) -> Vec<f32> {
         let mut encoder = self.device.create_command_encoder(&Default::default());
         encoder.copy_buffer_to_buffer(
-            &self.mag_buf, 0,
-            &self.mag_staging, 0,
+            &self.mag_buf,
+            0,
+            &self.mag_staging,
+            0,
             self.mag_staging.size(),
         );
         self.queue.submit(Some(encoder.finish()));
 
         let slice = self.mag_staging.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
-        let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
         rx.recv().unwrap().unwrap();
         let data = slice.get_mapped_range();
         let out: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
@@ -1005,10 +1161,22 @@ impl GpuSolver {
 
         // Probe: cell (probe_idx) at layer (probe_layer, default 0)
         let in_plane = self.config.geometry.nx * self.config.geometry.ny;
-        let probe_layer = self.config.probe_layer.unwrap_or(0).min(self.config.nz() - 1);
-        let probe_in_plane = self.config.probe_idx.unwrap_or(in_plane / 2).min(in_plane - 1);
+        let probe_layer = self
+            .config
+            .probe_layer
+            .unwrap_or(0)
+            .min(self.config.nz() - 1);
+        let probe_in_plane = self
+            .config
+            .probe_idx
+            .unwrap_or(in_plane / 2)
+            .min(in_plane - 1);
         let probe_cell = probe_layer * in_plane + probe_in_plane;
-        let probe_mz = if (probe_cell as usize) < n { mag[probe_cell as usize * 4 + 2] } else { 0.0 };
+        let probe_mz = if (probe_cell as usize) < n {
+            mag[probe_cell as usize * 4 + 2]
+        } else {
+            0.0
+        };
 
         // Thermal observables (only meaningful when thermal is active).
         let (max_t_e, max_t_p, min_m_reduced) = if self.config.photonic.thermal.is_some() {
@@ -1041,7 +1209,8 @@ impl GpuSolver {
     /// Fully re-upload GpuParams (useful after runtime changes to stack/substrate).
     pub fn upload_params(&self) {
         let params = GpuParams::from_config(&self.config);
-        self.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&params));
+        self.queue
+            .write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&params));
     }
 
     /// Current simulation time [s]. Matches `observables().time_ps / 1e12`.
@@ -1072,7 +1241,16 @@ impl GpuSolver {
     /// `t_ambient` / m_e(t_ambient) values; pre-existing buffer contents
     /// are discarded. When disabling, those buffers are left alone (the
     /// LLG path ignores them).
-    pub fn set_thermal(&mut self, thermal: Option<crate::photonic::ThermalConfig>) {
+    pub fn set_thermal(&mut self, mut thermal: Option<crate::photonic::ThermalConfig>) {
+        if let Some(tc) = thermal.as_mut() {
+            let nz = self.config.nz() as usize;
+            if tc.per_layer.is_empty() {
+                tc.per_layer = vec![crate::material_thermal::fgt_ni_surrogate(); nz];
+            } else if tc.per_layer.len() != nz {
+                let first = tc.per_layer[0].clone();
+                tc.per_layer.resize(nz, first);
+            }
+        }
         let engaging = self.config.photonic.thermal.is_none() && thermal.is_some();
         self.config.photonic.thermal = thermal;
         self.upload_params();
@@ -1083,8 +1261,13 @@ impl GpuSolver {
             // Also re-upload the LLB tables (they might have changed with a
             // new preset).
             let (m_e_data, chi_par_data) = pack_llb_tables(&self.config);
-            self.queue.write_buffer(&self._m_e_table_buf, 0, bytemuck::cast_slice(&m_e_data));
-            self.queue.write_buffer(&self._chi_par_table_buf, 0, bytemuck::cast_slice(&chi_par_data));
+            self.queue
+                .write_buffer(&self._m_e_table_buf, 0, bytemuck::cast_slice(&m_e_data));
+            self.queue.write_buffer(
+                &self._chi_par_table_buf,
+                0,
+                bytemuck::cast_slice(&chi_par_data),
+            );
         }
     }
 
@@ -1100,8 +1283,10 @@ impl GpuSolver {
             .map(|t| t.t_ambient)
             .unwrap_or(300.0);
         let init_t = vec![t_amb; self.cell_count as usize];
-        self.queue.write_buffer(&self.temp_e_buf, 0, bytemuck::cast_slice(&init_t));
-        self.queue.write_buffer(&self.temp_p_buf, 0, bytemuck::cast_slice(&init_t));
+        self.queue
+            .write_buffer(&self.temp_e_buf, 0, bytemuck::cast_slice(&init_t));
+        self.queue
+            .write_buffer(&self.temp_p_buf, 0, bytemuck::cast_slice(&init_t));
 
         let in_plane = (self.config.geometry.nx * self.config.geometry.ny) as usize;
         let b_z = self.config.b_ext[2].abs() as f64;
@@ -1114,8 +1299,10 @@ impl GpuSolver {
                 }
             }
         }
-        self.queue.write_buffer(&self.m_reduced_buf, 0, bytemuck::cast_slice(&m_init));
-        self.queue.write_buffer(&self.m_target_buf, 0, bytemuck::cast_slice(&m_init));
+        self.queue
+            .write_buffer(&self.m_reduced_buf, 0, bytemuck::cast_slice(&m_init));
+        self.queue
+            .write_buffer(&self.m_target_buf, 0, bytemuck::cast_slice(&m_init));
     }
 
     /// Readback the F2 proxy magnetization buffer (`m_target`).
@@ -1131,54 +1318,65 @@ impl GpuSolver {
             tc.t_ambient = t_ambient;
         }
         let data = [t_ambient, 0.0f32, 0.0, 0.0];
-        self.queue.write_buffer(&self.params_buf, 672, bytemuck::cast_slice(&data));
+        self.queue
+            .write_buffer(&self.params_buf, 672, bytemuck::cast_slice(&data));
     }
 
     /// Update external field at runtime. Offset 32 in the new layout.
     pub fn set_b_ext(&mut self, bx: f32, by: f32, bz: f32) {
         self.config.b_ext = [bx as f64, by as f64, bz as f64];
         let data = [bx, by, bz, 0.0f32];
-        self.queue.write_buffer(&self.params_buf, 32, bytemuck::cast_slice(&data));
+        self.queue
+            .write_buffer(&self.params_buf, 32, bytemuck::cast_slice(&data));
     }
 
     /// Override α of all layers simultaneously at runtime.
     pub fn set_alpha(&mut self, alpha: f32) {
         let data = [alpha; 4];
-        self.queue.write_buffer(&self.params_buf, 48, bytemuck::cast_slice(&data));
+        self.queue
+            .write_buffer(&self.params_buf, 48, bytemuck::cast_slice(&data));
     }
 
     /// Override exchange prefactor of all layers simultaneously at runtime.
     pub fn set_exchange_pf(&self, pf: f32) {
         let data = [pf; 4];
-        self.queue.write_buffer(&self.params_buf, 64, bytemuck::cast_slice(&data));
+        self.queue
+            .write_buffer(&self.params_buf, 64, bytemuck::cast_slice(&data));
     }
 
     /// Override per-layer DMI prefactor for all layers at runtime.
     pub fn set_dmi_pf(&self, pf: f32) {
         let data = [pf; 4];
-        self.queue.write_buffer(&self.params_buf, 96, bytemuck::cast_slice(&data));
+        self.queue
+            .write_buffer(&self.params_buf, 96, bytemuck::cast_slice(&data));
     }
 
     /// Update interlayer-exchange prefactors at runtime (Phase M2).
     pub fn set_interlayer_pfs(&self, below: [f32; 4], above: [f32; 4]) {
-        self.queue.write_buffer(&self.params_buf, 160, bytemuck::cast_slice(&below));
-        self.queue.write_buffer(&self.params_buf, 176, bytemuck::cast_slice(&above));
+        self.queue
+            .write_buffer(&self.params_buf, 160, bytemuck::cast_slice(&below));
+        self.queue
+            .write_buffer(&self.params_buf, 176, bytemuck::cast_slice(&above));
     }
 
     /// Override a single pulse's amplitude at runtime (Phase P2).
     /// Useful for programmatic pulse control or debugging.
     /// Note: `step_n` overwrites this each step when pulses are active.
     pub fn set_pulse_amplitude(&self, pulse_idx: usize, amplitude_t: f32) {
-        if pulse_idx >= 4 { return; }
+        if pulse_idx >= 4 {
+            return;
+        }
         let offset = OFFSET_PULSE_AMPLITUDES + (pulse_idx * 4) as u64;
-        self.queue.write_buffer(&self.params_buf, offset, bytemuck::bytes_of(&amplitude_t));
+        self.queue
+            .write_buffer(&self.params_buf, offset, bytemuck::bytes_of(&amplitude_t));
     }
 
     /// Update exchange bias for layer 0 at runtime.
     pub fn set_b_bias(&self, bx: f32, by: f32, bz: f32) {
         // layer_b_biases starts at offset 256, layer 0 occupies first 16 bytes
         let data = [bx, by, bz, 0.0f32];
-        self.queue.write_buffer(&self.params_buf, 256, bytemuck::cast_slice(&data));
+        self.queue
+            .write_buffer(&self.params_buf, 256, bytemuck::cast_slice(&data));
     }
 
     /// Update SOT torques for layer 0 at runtime.
@@ -1186,24 +1384,32 @@ impl GpuSolver {
         // layer_sot_tau_dls at 112, layer_sot_tau_fls at 128
         let tdl = [tau_dl; 4];
         let tfl = [tau_fl; 4];
-        self.queue.write_buffer(&self.params_buf, 112, bytemuck::cast_slice(&tdl));
-        self.queue.write_buffer(&self.params_buf, 128, bytemuck::cast_slice(&tfl));
+        self.queue
+            .write_buffer(&self.params_buf, 112, bytemuck::cast_slice(&tdl));
+        self.queue
+            .write_buffer(&self.params_buf, 128, bytemuck::cast_slice(&tfl));
     }
 
     /// Update σ direction for layer 0 at runtime.
     pub fn set_sigma(&self, sx: f32, sy: f32, sz: f32) {
         // layer_sigmas starts at offset 320, layer 0 first 16 bytes
         let data = [sx, sy, sz, 0.0f32];
-        self.queue.write_buffer(&self.params_buf, 320, bytemuck::cast_slice(&data));
+        self.queue
+            .write_buffer(&self.params_buf, 320, bytemuck::cast_slice(&data));
     }
 
-    pub fn step_count(&self) -> usize { self.step }
-    pub fn config(&self) -> &SimConfig { &self.config }
+    pub fn step_count(&self) -> usize {
+        self.step
+    }
+    pub fn config(&self) -> &SimConfig {
+        &self.config
+    }
 
     /// Re-upload magnetization: uniform +z with small perturbation (all layers).
     pub fn reset_uniform_z(&mut self) {
         let data = Self::init_magnetization(&self.config);
-        self.queue.write_buffer(&self.mag_buf, 0, bytemuck::cast_slice(&data));
+        self.queue
+            .write_buffer(&self.mag_buf, 0, bytemuck::cast_slice(&data));
         self.step = 0;
         self.t_sim = 0.0;
     }
@@ -1227,7 +1433,8 @@ impl GpuSolver {
             data[cell * 4 + 1] = st * phi.sin();
             data[cell * 4 + 2] = sign * theta.cos();
         }
-        self.queue.write_buffer(&self.mag_buf, 0, bytemuck::cast_slice(&data));
+        self.queue
+            .write_buffer(&self.mag_buf, 0, bytemuck::cast_slice(&data));
         self.step = 0;
         self.t_sim = 0.0;
     }
@@ -1252,7 +1459,8 @@ impl GpuSolver {
                 }
             }
         }
-        self.queue.write_buffer(&self.mag_buf, 0, bytemuck::cast_slice(&data));
+        self.queue
+            .write_buffer(&self.mag_buf, 0, bytemuck::cast_slice(&data));
         self.step = 0;
         self.t_sim = 0.0;
     }
@@ -1270,7 +1478,11 @@ impl GpuSolver {
             let cell_u = cell as u32;
             let in_plane_idx = cell_u % in_plane;
             let ix = in_plane_idx / ny;
-            let mz_sign: f32 = if (ix / stripe_width) % 2 == 0 { 1.0 } else { -1.0 };
+            let mz_sign: f32 = if (ix / stripe_width) % 2 == 0 {
+                1.0
+            } else {
+                -1.0
+            };
             let theta: f32 = rng.gen_range(0.0..0.087);
             let phi: f32 = rng.gen_range(0.0..std::f32::consts::TAU);
             let st = theta.sin();
@@ -1278,7 +1490,8 @@ impl GpuSolver {
             data[cell * 4 + 1] = st * phi.sin();
             data[cell * 4 + 2] = mz_sign * theta.cos();
         }
-        self.queue.write_buffer(&self.mag_buf, 0, bytemuck::cast_slice(&data));
+        self.queue
+            .write_buffer(&self.mag_buf, 0, bytemuck::cast_slice(&data));
         self.step = 0;
         self.t_sim = 0.0;
     }
@@ -1316,7 +1529,8 @@ impl GpuSolver {
             data[cell * 4 + 1] = my as f32;
             data[cell * 4 + 2] = mz as f32;
         }
-        self.queue.write_buffer(&self.mag_buf, 0, bytemuck::cast_slice(&data));
+        self.queue
+            .write_buffer(&self.mag_buf, 0, bytemuck::cast_slice(&data));
         self.step = 0;
         self.t_sim = 0.0;
     }

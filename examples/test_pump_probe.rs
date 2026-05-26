@@ -21,7 +21,10 @@ fn response_amplitude(pulses: Vec<LaserPulse>, total_steps: usize) -> f32 {
     let mut cfg = SimConfig::fgt_default(16, 16);
     cfg.dt = 1.0e-14;
     cfg.total_steps = total_steps;
-    cfg.photonic = PhotonicConfig { pulses, thermal: None };
+    cfg.photonic = PhotonicConfig {
+        pulses,
+        thermal: None,
+    };
 
     let mut solver = GpuSolver::new(&cfg).expect("GPU init");
     solver.reset_uniform_z();
@@ -59,17 +62,11 @@ fn main() {
     let single = response_amplitude(vec![make_pulse(20.0, 0.5)], 3_000);
 
     // Two pulses, closely spaced (≈ 1 precession period apart) — coherent.
-    let two_near = response_amplitude(
-        vec![make_pulse(20.0, 0.5), make_pulse(20.5, 0.5)],
-        3_000,
-    );
+    let two_near = response_amplitude(vec![make_pulse(20.0, 0.5), make_pulse(20.5, 0.5)], 3_000);
 
     // Two pulses, widely spaced (>> damping time) — second pulse re-excites
     // after first has decayed; late response dominated by pulse 2.
-    let two_far = response_amplitude(
-        vec![make_pulse(20.0, 0.5), make_pulse(25.0, 0.5)],
-        3_000,
-    );
+    let two_far = response_amplitude(vec![make_pulse(20.0, 0.5), make_pulse(25.0, 0.5)], 3_000);
 
     println!("single-pulse |avg_mx| max          = {:.4}", single);
     println!("two pulses, Δ = 0.5 ps, |avg_mx|   = {:.4}", two_near);

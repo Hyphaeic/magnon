@@ -179,7 +179,7 @@ Equations: [`docs/equations.md`](docs/equations.md).
 | [`docs/usage.md`](docs/usage.md) | CLI flags, dashboard keymap, preset library |
 | [`docs/calibration.md`](docs/calibration.md) | Zhou-2025 calibration procedure + how to fit new materials |
 | [`docs/references.md`](docs/references.md) | Bibliography (every cited paper) |
-| `branches/hir/decisions/ADR-*` | Six architecture-decision records (006 supersedes 005 for the FGT preset) |
+| Historical ADRs | Some comments reference prior ADRs; they are not part of this checkout |
 
 ---
 

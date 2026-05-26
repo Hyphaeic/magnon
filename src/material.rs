@@ -168,12 +168,12 @@ impl BulkMaterial {
 impl std::fmt::Display for BulkMaterial {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "BulkMaterial[{}]:", self.name)?;
-        writeln!(f, "  Ms    = {:.3e} A/m",       self.ms_bulk)?;
-        writeln!(f, "  A_ex  = {:.3e} J/m",       self.a_ex_bulk)?;
-        writeln!(f, "  K_u   = {:.3e} J/m³",      self.k_u_bulk)?;
-        writeln!(f, "  alpha = {:.5}",            self.alpha_bulk)?;
+        writeln!(f, "  Ms    = {:.3e} A/m", self.ms_bulk)?;
+        writeln!(f, "  A_ex  = {:.3e} J/m", self.a_ex_bulk)?;
+        writeln!(f, "  K_u   = {:.3e} J/m³", self.k_u_bulk)?;
+        writeln!(f, "  alpha = {:.5}", self.alpha_bulk)?;
         writeln!(f, "  gamma = {:.3e} rad/(s·T)", self.gamma)?;
-        writeln!(f, "  Tc    = {:.0} K",          self.tc_bulk)?;
-        writeln!(f, "  notes: {}",                 self.notes)
+        writeln!(f, "  Tc    = {:.0} K", self.tc_bulk)?;
+        writeln!(f, "  notes: {}", self.notes)
     }
 }

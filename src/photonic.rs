@@ -68,7 +68,9 @@ impl LaserPulse {
     #[inline]
     pub fn envelope_at(&self, t: f64) -> f64 {
         let sigma = self.duration_fwhm / 2.354_820_045;
-        if sigma < 1e-30 { return 0.0; }
+        if sigma < 1e-30 {
+            return 0.0;
+        }
         let dt = t - self.t_center;
         (-(dt * dt) / (2.0 * sigma * sigma)).exp()
     }
@@ -97,11 +99,14 @@ pub struct ThermalConfig {
     pub t_ambient: f32,
     /// Per-layer M3TM + LLB parameters (one entry per layer in the stack).
     pub per_layer: Vec<LayerThermalParams>,
-    /// Timestep cap while inside a pulse's thermal window [s].
-    /// Typical 1e-15 s (1 fs). Enforced by host-side sub-looping.
+    /// Timestep cap for thermal-active integration [s].
+    /// Typical 1e-15 s (1 fs). When this is smaller than `SimConfig::dt`,
+    /// the GPU solver substeps each logical step with this cap.
     pub thermal_dt_cap: f64,
     /// (before, after) window around each pulse peak during which
-    /// `thermal_dt_cap` is enforced [s]. Default (0.5 ps, 10 ps).
+    /// `thermal_dt_cap` may be restricted in a future adaptive policy [s].
+    /// Currently stored for protocol metadata; substepping is applied for all
+    /// thermal-active steps.
     pub thermal_window: (f64, f64),
     /// Engage LLB longitudinal-relaxation path (P3b). Default false (P3a).
     pub enable_llb: bool,
@@ -339,8 +344,12 @@ impl PhotonicConfig {
             eprintln!("Photonic drive: {} laser pulse(s)", self.pulses.len());
             for (i, p) in self.pulses.iter().enumerate() {
                 let spatial = if p.spot_sigma > 0.0 {
-                    format!(", spot = ({:.1}, {:.1}) nm, σ = {:.1} nm",
-                            p.spot_center[0] * 1e9, p.spot_center[1] * 1e9, p.spot_sigma * 1e9)
+                    format!(
+                        ", spot = ({:.1}, {:.1}) nm, σ = {:.1} nm",
+                        p.spot_center[0] * 1e9,
+                        p.spot_center[1] * 1e9,
+                        p.spot_sigma * 1e9
+                    )
                 } else {
                     " [spatially uniform]".to_string()
                 };
@@ -395,20 +404,27 @@ pub fn parse_pulse_spec(spec: &str) -> Result<LaserPulse, String> {
     let mut it = spec.split(',').peekable();
     while let Some(part) = it.next() {
         let p = part.trim();
-        if p.is_empty() { continue; }
-        let eq = p.find('=').ok_or_else(|| format!("Expected key=value, got '{p}'"))?;
+        if p.is_empty() {
+            continue;
+        }
+        let eq = p
+            .find('=')
+            .ok_or_else(|| format!("Expected key=value, got '{p}'"))?;
         let key = &p[..eq];
         let mut value = p[eq + 1..].to_string();
 
         // Special handling for `dir=x,y,z` — value may extend across two commas
-        if key == "dir" && !["x", "y", "z", "-x", "-y", "-z", "+x", "+y", "+z"]
-            .contains(&value.as_str()) && !value.contains(' ')
+        if key == "dir"
+            && !["x", "y", "z", "-x", "-y", "-z", "+x", "+y", "+z"].contains(&value.as_str())
+            && !value.contains(' ')
         {
             // Might be "dir=a" with b,c in later segments
             // Already split by ',', so peek ahead for numeric-only next segments
             while let Some(next) = it.peek() {
                 let n = next.trim();
-                if n.chars().next().map_or(false, |c| c.is_ascii_digit() || c == '-' || c == '+' || c == '.') {
+                if n.chars().next().map_or(false, |c| {
+                    c.is_ascii_digit() || c == '-' || c == '+' || c == '.'
+                }) {
                     value.push(',');
                     value.push_str(n);
                     it.next();
@@ -419,15 +435,25 @@ pub fn parse_pulse_spec(spec: &str) -> Result<LaserPulse, String> {
         }
 
         match key {
-            "t" | "t_center" => { t_center = Some(parse_time(&value)?); }
-            "fwhm" | "duration" => { fwhm = Some(parse_time_fs_default(&value)?); }
+            "t" | "t_center" => {
+                t_center = Some(parse_time(&value)?);
+            }
+            "fwhm" | "duration" => {
+                fwhm = Some(parse_time_fs_default(&value)?);
+            }
             "peak" | "peak_field" | "amplitude" => {
                 let trimmed = value.trim_end_matches('T').trim_end_matches('t');
                 peak = Some(trimmed.parse().map_err(|e| format!("peak: {e}"))?);
             }
-            "dir" | "direction" => { dir = Some(parse_direction(&value)?); }
-            "x" | "spot_x" => { spot_x = parse_length_nm_default(&value)?; }
-            "y" | "spot_y" => { spot_y = parse_length_nm_default(&value)?; }
+            "dir" | "direction" => {
+                dir = Some(parse_direction(&value)?);
+            }
+            "x" | "spot_x" => {
+                spot_x = parse_length_nm_default(&value)?;
+            }
+            "y" | "spot_y" => {
+                spot_y = parse_length_nm_default(&value)?;
+            }
             "sigma" | "spot" | "spot_sigma" | "waist" => {
                 spot_sigma = parse_length_nm_default(&value)?;
             }
@@ -460,11 +486,17 @@ pub fn parse_pulse_spec(spec: &str) -> Result<LaserPulse, String> {
 fn parse_fluence_mj_cm2_default(s: &str) -> Result<f64, String> {
     let s = s.trim();
     if let Some(r) = s.strip_suffix("J/m2").or_else(|| s.strip_suffix("Jm2")) {
-        let v: f64 = r.trim().parse().map_err(|e| format!("fluence '{s}': {e}"))?;
+        let v: f64 = r
+            .trim()
+            .parse()
+            .map_err(|e| format!("fluence '{s}': {e}"))?;
         Ok(v)
     } else {
         let r = s.strip_suffix("mJ/cm2").unwrap_or(s);
-        let v: f64 = r.trim().parse().map_err(|e| format!("fluence '{s}': {e}"))?;
+        let v: f64 = r
+            .trim()
+            .parse()
+            .map_err(|e| format!("fluence '{s}': {e}"))?;
         // 1 mJ/cm² = 10 J/m²
         Ok(v * 10.0)
     }
@@ -486,7 +518,10 @@ fn parse_length_nm_default(s: &str) -> Result<f64, String> {
     } else {
         (s, 1e-9) // default nm
     };
-    let v: f64 = num_str.trim().parse().map_err(|e| format!("length '{s}': {e}"))?;
+    let v: f64 = num_str
+        .trim()
+        .parse()
+        .map_err(|e| format!("length '{s}': {e}"))?;
     Ok(v * scale)
 }
 
@@ -504,7 +539,10 @@ fn parse_time(s: &str) -> Result<f64, String> {
     } else {
         (s, 1e-12) // default ps
     };
-    let v: f64 = num_str.trim().parse().map_err(|e| format!("time '{s}': {e}"))?;
+    let v: f64 = num_str
+        .trim()
+        .parse()
+        .map_err(|e| format!("time '{s}': {e}"))?;
     Ok(v * scale)
 }
 
@@ -522,7 +560,10 @@ fn parse_time_fs_default(s: &str) -> Result<f64, String> {
     } else {
         (s, 1e-15) // default fs
     };
-    let v: f64 = num_str.trim().parse().map_err(|e| format!("duration '{s}': {e}"))?;
+    let v: f64 = num_str
+        .trim()
+        .parse()
+        .map_err(|e| format!("duration '{s}': {e}"))?;
     Ok(v * scale)
 }
 
@@ -538,7 +579,9 @@ fn parse_direction(s: &str) -> Result<[f32; 3], String> {
             // Parse "a,b,c"
             let parts: Vec<&str> = other.split(',').map(str::trim).collect();
             if parts.len() != 3 {
-                return Err(format!("direction '{other}': expected 'x'/'y'/'z' or 'a,b,c'"));
+                return Err(format!(
+                    "direction '{other}': expected 'x'/'y'/'z' or 'a,b,c'"
+                ));
             }
             let x: f32 = parts[0].parse().map_err(|e| format!("dir x: {e}"))?;
             let y: f32 = parts[1].parse().map_err(|e| format!("dir y: {e}"))?;

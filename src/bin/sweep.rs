@@ -89,14 +89,19 @@ impl Default for SweepArgs {
     fn default() -> Self {
         Self {
             materials: vec!["fgt-bulk".to_string(), "fgt-effective".to_string()],
-            substrates: vec!["vacuum".to_string(), "pt".to_string(), "wte2".to_string(), "yig".to_string()],
+            substrates: vec![
+                "vacuum".to_string(),
+                "pt".to_string(),
+                "wte2".to_string(),
+                "yig".to_string(),
+            ],
             thicknesses_nm: vec![0.7, 2.1],
             bz_values: vec![0.0],
             jx_values: vec![0.0],
             nx: 32,
             ny: 32,
             cell_size_nm: 2.5,
-            dt_ps: 0.1,
+            dt_ps: 0.01,
             relax_steps: 5000,
             pulse_strength_t: 1.0,
             pulse_duration_steps: 100,
@@ -128,23 +133,27 @@ impl Default for SweepArgs {
 
 /// Parse a stack spec "MAT1:T_nm,MAT2:T_nm,..." into Vec<Layer>.
 fn parse_stack_spec(spec: &str) -> Result<Vec<Layer>, String> {
-    spec.split(',').map(|entry| {
-        let parts: Vec<&str> = entry.trim().split(':').collect();
-        if parts.len() != 2 {
-            return Err(format!("Bad layer spec '{entry}'"));
-        }
-        let name = parts[0].trim();
-        let thickness_nm: f64 = parts[1].trim().parse().map_err(|e| format!("{e}"))?;
-        let material = BulkMaterial::lookup(name)
-            .ok_or_else(|| format!("Unknown material '{name}'"))?;
-        Ok(Layer { material, thickness: thickness_nm * 1e-9, u_axis: [0.0, 0.0, 1.0] })
-    }).collect()
+    spec.split(',')
+        .map(|entry| {
+            let parts: Vec<&str> = entry.trim().split(':').collect();
+            if parts.len() != 2 {
+                return Err(format!("Bad layer spec '{entry}'"));
+            }
+            let name = parts[0].trim();
+            let thickness_nm: f64 = parts[1].trim().parse().map_err(|e| format!("{e}"))?;
+            let material =
+                BulkMaterial::lookup(name).ok_or_else(|| format!("Unknown material '{name}'"))?;
+            Ok(Layer {
+                material,
+                thickness: thickness_nm * 1e-9,
+                u_axis: [0.0, 0.0, 1.0],
+            })
+        })
+        .collect()
 }
 
 fn parse_list_f64(s: &str) -> Vec<f64> {
-    s.split(',')
-        .filter_map(|x| x.trim().parse().ok())
-        .collect()
+    s.split(',').filter_map(|x| x.trim().parse().ok()).collect()
 }
 
 fn parse_list_str(s: &str) -> Vec<String> {
@@ -160,21 +169,66 @@ fn parse_args() -> SweepArgs {
     let mut i = 1;
     while i < raw.len() {
         match raw[i].as_str() {
-            "--materials" => { args.materials = parse_list_str(&raw[i + 1]); i += 2; }
-            "--substrates" => { args.substrates = parse_list_str(&raw[i + 1]); i += 2; }
-            "--thicknesses" => { args.thicknesses_nm = parse_list_f64(&raw[i + 1]); i += 2; }
-            "--bz-values" => { args.bz_values = parse_list_f64(&raw[i + 1]); i += 2; }
-            "--jx-values" => { args.jx_values = parse_list_f64(&raw[i + 1]); i += 2; }
-            "--nx" => { args.nx = raw[i + 1].parse().unwrap(); i += 2; }
-            "--ny" => { args.ny = raw[i + 1].parse().unwrap(); i += 2; }
-            "--cell-size" => { args.cell_size_nm = raw[i + 1].parse().unwrap(); i += 2; }
-            "--dt-ps" => { args.dt_ps = raw[i + 1].parse().unwrap(); i += 2; }
-            "--relax-steps" => { args.relax_steps = raw[i + 1].parse().unwrap(); i += 2; }
-            "--pulse" => { args.pulse_strength_t = raw[i + 1].parse().unwrap(); i += 2; }
-            "--pulse-steps" => { args.pulse_duration_steps = raw[i + 1].parse().unwrap(); i += 2; }
-            "--sample-interval" => { args.sample_interval_steps = raw[i + 1].parse().unwrap(); i += 2; }
-            "--num-samples" => { args.num_samples = raw[i + 1].parse().unwrap(); i += 2; }
-            "--output" | "-o" => { args.output_path = raw[i + 1].clone(); i += 2; }
+            "--materials" => {
+                args.materials = parse_list_str(&raw[i + 1]);
+                i += 2;
+            }
+            "--substrates" => {
+                args.substrates = parse_list_str(&raw[i + 1]);
+                i += 2;
+            }
+            "--thicknesses" => {
+                args.thicknesses_nm = parse_list_f64(&raw[i + 1]);
+                i += 2;
+            }
+            "--bz-values" => {
+                args.bz_values = parse_list_f64(&raw[i + 1]);
+                i += 2;
+            }
+            "--jx-values" => {
+                args.jx_values = parse_list_f64(&raw[i + 1]);
+                i += 2;
+            }
+            "--nx" => {
+                args.nx = raw[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--ny" => {
+                args.ny = raw[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--cell-size" => {
+                args.cell_size_nm = raw[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--dt-ps" => {
+                args.dt_ps = raw[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--relax-steps" => {
+                args.relax_steps = raw[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--pulse" => {
+                args.pulse_strength_t = raw[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--pulse-steps" => {
+                args.pulse_duration_steps = raw[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--sample-interval" => {
+                args.sample_interval_steps = raw[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--num-samples" => {
+                args.num_samples = raw[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--output" | "-o" => {
+                args.output_path = raw[i + 1].clone();
+                i += 2;
+            }
             "--stack-spec" => {
                 args.stack_spec = Some(raw[i + 1].clone());
                 i += 2;
@@ -187,7 +241,10 @@ fn parse_args() -> SweepArgs {
                 args.stack_spacing_nm = Some(parse_list_f64(&raw[i + 1]));
                 i += 2;
             }
-            "--pump-probe-mode" => { args.pump_probe_mode = true; i += 1; }
+            "--pump-probe-mode" => {
+                args.pump_probe_mode = true;
+                i += 1;
+            }
             "--pump-t-center" => {
                 args.pump_t_center = raw[i + 1].parse::<f64>().unwrap() * 1e-12;
                 i += 2;
@@ -196,7 +253,10 @@ fn parse_args() -> SweepArgs {
                 args.pump_fwhm = raw[i + 1].parse::<f64>().unwrap() * 1e-15;
                 i += 2;
             }
-            "--pump-peak" => { args.pump_peak_t = raw[i + 1].parse().unwrap(); i += 2; }
+            "--pump-peak" => {
+                args.pump_peak_t = raw[i + 1].parse().unwrap();
+                i += 2;
+            }
             "--pump-fluence" => {
                 args.pump_fluence_j_m2 = Some(raw[i + 1].parse::<f64>().unwrap() * 10.0);
                 i += 2;
@@ -205,7 +265,10 @@ fn parse_args() -> SweepArgs {
                 args.pump_reflectivity = raw[i + 1].parse().unwrap();
                 i += 2;
             }
-            "--probe-peak" => { args.probe_peak_t = raw[i + 1].parse().unwrap(); i += 2; }
+            "--probe-peak" => {
+                args.probe_peak_t = raw[i + 1].parse().unwrap();
+                i += 2;
+            }
             "--probe-fwhm" => {
                 args.probe_fwhm = raw[i + 1].parse::<f64>().unwrap() * 1e-15;
                 i += 2;
@@ -234,13 +297,23 @@ fn parse_args() -> SweepArgs {
                 args.enable_thermal = true;
                 i += 2;
             }
-            "--enable-thermal" => { args.enable_thermal = true; i += 1; }
-            "--enable-llb" => { args.enable_llb = true; args.enable_thermal = true; i += 1; }
+            "--enable-thermal" => {
+                args.enable_thermal = true;
+                i += 1;
+            }
+            "--enable-llb" => {
+                args.enable_llb = true;
+                args.enable_thermal = true;
+                i += 1;
+            }
             "--t-ambient" => {
                 args.thermal_t_ambient = raw[i + 1].parse().unwrap();
                 i += 2;
             }
-            "--help" | "-h" => { print_help(); std::process::exit(0); }
+            "--help" | "-h" => {
+                print_help();
+                std::process::exit(0);
+            }
             other => {
                 eprintln!("Unknown arg: {other}");
                 print_help();
@@ -255,21 +328,27 @@ fn print_help() {
     eprintln!("magnonic-sweep — parametric sweep harness");
     eprintln!();
     eprintln!("Design axes (comma-separated lists):");
-    eprintln!("  --materials M1,M2,...       Bulk material names (default: fgt-bulk,fgt-effective)");
+    eprintln!(
+        "  --materials M1,M2,...       Bulk material names (default: fgt-bulk,fgt-effective)"
+    );
     eprintln!("  --substrates S1,S2,...      Substrate names (default: vacuum,pt,wte2,yig)");
     eprintln!("  --thicknesses T1,T2,...     Film thicknesses [nm] (default: 0.7,2.1)");
     eprintln!("  --bz-values B1,B2,...       External field z [T] (default: 0.0)");
     eprintln!("  --jx-values J1,J2,...       Current density along x [A/m²] (default: 0.0)");
     eprintln!();
     eprintln!("Multilayer stack (M4 — overrides --materials/--thicknesses):");
-    eprintln!("  --stack-spec \"MAT1:T_nm,MAT2:T_nm,...\"  Fixed stack used for every design point");
-    eprintln!("  --stack-interlayer-a A1,A2,...           Interlayer exchange [J/m], N_layers-1 values");
+    eprintln!(
+        "  --stack-spec \"MAT1:T_nm,MAT2:T_nm,...\"  Fixed stack used for every design point"
+    );
+    eprintln!(
+        "  --stack-interlayer-a A1,A2,...           Interlayer exchange [J/m], N_layers-1 values"
+    );
     eprintln!("  --stack-spacing D1,D2,...                Per-interface z-spacing [nm], N_layers-1 values");
     eprintln!();
     eprintln!("Geometry:");
     eprintln!("  --nx / --ny N               Grid (default 32)");
     eprintln!("  --cell-size F               Cell size [nm] (default 2.5)");
-    eprintln!("  --dt-ps F                   Timestep [ps] (default 0.1)");
+    eprintln!("  --dt-ps F                   Timestep [ps] (default 0.01)");
     eprintln!();
     eprintln!("Measurement protocol:");
     eprintln!("  --relax-steps N             Equilibration steps (default 5000)");
@@ -291,7 +370,7 @@ fn print_help() {
     eprintln!("  --pump-probe-delay-range START END N    delay axis [ps]");
     eprintln!();
     eprintln!("Thermal (adds M3TM source + optional LLB integrator):");
-    eprintln!("  --enable-thermal              attach a thermal config (M3TM observables populated)");
+    eprintln!("  --enable-thermal              attach a thermal config (default preset fgt)");
     eprintln!("  --enable-llb                  engage LLB integrator (implies --enable-thermal)");
     eprintln!("  --thermal-preset KEY          ni | py | fgt | yig | cofeb (default fgt)");
     eprintln!("  --t-ambient K                 ambient bath temperature [K] (default 300)");
@@ -363,7 +442,10 @@ fn build_pump_probe_pulses(args: &SweepArgs, delay_ps: f64) -> Vec<LaserPulse> {
 fn total_fluence_mj_cm2(pulses: &[LaserPulse]) -> f64 {
     pulses
         .iter()
-        .filter_map(|p| p.peak_fluence.map(|f| (1.0 - p.reflectivity as f64) * f * 0.1))
+        .filter_map(|p| {
+            p.peak_fluence
+                .map(|f| (1.0 - p.reflectivity as f64) * f * 0.1)
+        })
         .sum()
 }
 
@@ -385,7 +467,10 @@ fn build_thermal_config(args: &SweepArgs, nz: usize) -> Option<ThermalConfig> {
     if !args.enable_thermal {
         return None;
     }
-    let key = args.thermal_preset_key.as_deref().unwrap_or("fgt-ni-surrogate");
+    let key = args
+        .thermal_preset_key
+        .as_deref()
+        .unwrap_or("fgt-ni-surrogate");
     let preset = match material_thermal::for_key(key) {
         Some(p) => p,
         None => {
@@ -491,7 +576,11 @@ fn build_stack_from_args(
             ));
         }
         Ok((
-            Stack { layers, interlayer_a, layer_spacing },
+            Stack {
+                layers,
+                interlayer_a,
+                layer_spacing,
+            },
             spec.clone(),
             n as u32,
         ))
@@ -683,9 +772,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                          {:.4e},{:.4e},{:.4e},{:.5},{:.4e},{bz},{jx:.3e},\
                                          {:.4},{:.4},{:.3e},{:.4e},{:.6},{:.4e},{:.3},\
                                          ,0,0,0,0,0",
-                                        layer0.ms, layer0.a_ex, layer0.k_u, layer0.alpha, layer0.d_dmi,
-                                        m.freq_ghz, m.freq_width_ghz, m.q_factor,
-                                        m.decay_time_ns, m.final_value, m.late_amplitude,
+                                        layer0.ms,
+                                        layer0.a_ex,
+                                        layer0.k_u,
+                                        layer0.alpha,
+                                        layer0.d_dmi,
+                                        m.freq_ghz,
+                                        m.freq_width_ghz,
+                                        m.q_factor,
+                                        m.decay_time_ns,
+                                        m.final_value,
+                                        m.late_amplitude,
                                         m.dt_sample_ps,
                                     )?;
                                     out.flush()?;
@@ -708,8 +805,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let total_elapsed = t_start.elapsed().as_secs_f64();
     eprintln!();
-    eprintln!("Sweep complete: {idx} points in {total_elapsed:.1}s ({:.2}s/point avg)",
-              total_elapsed / (idx as f64).max(1.0));
+    eprintln!(
+        "Sweep complete: {idx} points in {total_elapsed:.1}s ({:.2}s/point avg)",
+        total_elapsed / (idx as f64).max(1.0)
+    );
     eprintln!("CSV: {}", args.output_path);
 
     Ok(())

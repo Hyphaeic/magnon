@@ -436,9 +436,11 @@ default `fgt_default()` uses dt = 1·10⁻¹⁴.
 dt · α_∥(T) / tau_long_base   < 0.1
 ```
 
-Currently advisory: `thermal_dt_cap` is a stored field but the host
-does not enforce sub-stepping. The implicit-Euler m_target update is
-unconditionally stable.
+When thermal dynamics are active, `thermal_dt_cap` is enforced by
+splitting each logical step into GPU substeps of at most that duration.
+The implicit-Euler m_target update is unconditionally stable, but the
+M3TM and transverse LLB terms still need a physically sensible fs-scale
+step.
 
 ### 10.3 Pulse temporal sampling
 

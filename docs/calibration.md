@@ -25,8 +25,8 @@ operating point.
 | Optical skin depth (fixed) | 18 nm (FGT @ 400 nm physics estimate) |
 
 `m_e(210 K, 1 T) = 0.264` — well-defined pre-pulse state (this number
-was zero by construction pre-F1, hence the original Option-A
-calibration's shift to T = 150 K; ADR-006 records the supersession).
+was zero by construction pre-F1, hence the original calibration's
+temporary shift to T = 150 K).
 
 ### 1.2 Fit targets and observables
 
@@ -68,7 +68,7 @@ constant, not a fit handle.
 
 `a_sf` is **not** in the grid because the Koopmans dm/dt term is
 replaced by the LLB longitudinal torque under `enable_llb=true`, so
-`a_sf` is inert. ADR-005 §Consequences/Neutral.
+`a_sf` is inert.
 
 ### 1.4 Fit result
 
@@ -98,19 +98,23 @@ off against each other.
 
 ### 1.5 Trust boundaries
 
-The preset is **valid** for Zhou-style ultrafast-demag morphology
-studies in FGT at:
-- T ∈ [100, 220] K
-- B = 1 T (the field at which it was fit)
-- F ∈ [~0.1, ~0.5] mJ/cm² (single-pulse absorbed fluence)
-- Pulses producing demag in the 50–90 % range
+The preset is calibrated at one operating point:
+- T = 210 K
+- B = 1 T
+- F = 0.24 mJ/cm² (single-pulse absorbed fluence)
+- 150 fs FWHM pulse on a 5 nm FGT flake
+
+It is useful for qualitative Zhou-style ultrafast-demag morphology
+exploration near that point, especially when the simulated response
+stays in the same broad 50–90 % demag regime.
 
 The preset is **NOT** validated for:
 - **Cross-fluence prediction** at the same (T, B). The fit was
   single-fluence; the basin shape under varying F is unmeasured.
 - **B ≠ 1 T** without re-fitting. The field-induced m_e(T_c, B) enters
   the dynamics and shifts the loss landscape.
-- **Cross-temperature scans** through Zhou's full 1.5–300 K range.
+- **Cross-temperature scans**, including the broader 100–220 K range and
+  Zhou's full 1.5–300 K range.
 - **Materials beyond FGT**.
 
 For predictions outside the validated band, treat the simulation
@@ -183,8 +187,8 @@ The parameters that are genuinely fit:
 6. Inspect top-5 cluster width. If too broad, add a third experimental
    constraint (e.g., demag at a second fluence) and tighten the loss.
 7. Update the preset with the best-fit values.
-8. Add an ADR documenting the operating point, fit basin width, and
-   trust boundaries (template: ADR-006).
+8. Document the operating point, fit basin width, and trust boundaries
+   in this calibration guide or an equivalent in-tree note.
 9. Add a row to the preset table in [`usage.md`](usage.md) §5.3.
 
 ### 2.5 Honesty checklist before shipping a calibrated preset

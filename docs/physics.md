@@ -127,6 +127,10 @@ this kernel:
 
 The LLB longitudinal torque then drives `|m|` toward `m_target` (not
 toward `m_e` directly) on the slow timescale `tau_long_base / α_∥(T)`.
+The LLB path uses `T_e` as the effective spin temperature for
+`α_⊥(T)`, `α_∥(T)`, and `m_e(T, B)`. This is a modelling approximation:
+there is no separate spin-temperature state or spin-bath equilibration
+equation.
 
 When the LLG path runs (thermal off), this pipeline is not dispatched
 and the four legacy pipelines execute exactly as before — the existing
@@ -225,7 +229,7 @@ added. Practical consequences:
 
 - µMAG SP4 (the standard correctness benchmark) cannot be reproduced
   literally. We use a deterministic LLG-vs-LLB-at-T=0 skyrmion proxy
-  instead (`mumag-sp4-proxy`). ADR-004 documents the substitution.
+  instead (`mumag-sp4-proxy`).
 - Permalloy and CoFeB at typical thin-film thicknesses are dominated
   by shape anisotropy (~0.9 MJ/m³ for CoFeB). Without demag, K_u
   alone determines the easy-axis behaviour, which is qualitatively
@@ -299,8 +303,8 @@ trend exploration only.
 When `enable_llb = true`, the M3TM Koopmans dm/dt term is replaced by
 the LLB longitudinal torque, which uses `m_target` (not the M3TM track)
 as the demagnetisation driver. Consequence: `a_sf` does not affect the
-demagnetisation depth in any LLB-active simulation. See ADR-005
-§Consequences/Neutral. The only way `a_sf` re-enters the dynamics is
+demagnetisation depth in any LLB-active simulation. The only way `a_sf`
+re-enters the dynamics is
 either (i) via `enable_llb = false` (which removes the F2 two-stage
 chain), or (ii) via the future Atxitia LLB form where χ_∥ implicitly
 carries `a_sf` through R.
@@ -325,8 +329,9 @@ on recovery; loss 0.0002).
 **This is a single-operating-point morphology fit.** Two parameters
 (`tau_fast`, `R`) trade off against each other in the broad Loss < 0.01
 basin. The preset is NOT validated for cross-fluence or cross-temperature
-extrapolation. Any prediction outside the (T, B, F) point at which it
-was fit is an extrapolation; treat with appropriate scepticism.
+extrapolation. Any prediction outside the exact fitted point
+(T = 210 K, B_z = 1 T, F = 0.24 mJ/cm², 150 fs FWHM, 5 nm FGT) is an
+exploratory extrapolation; treat it with appropriate scepticism.
 
 See [`calibration.md`](calibration.md) for the full procedure and
 [`references.md`](references.md) for the Zhou citation.
@@ -356,5 +361,5 @@ windows" budget.
 - [`calibration.md`](calibration.md) — Zhou recalibration + how to fit
   new materials.
 - [`references.md`](references.md) — bibliography.
-- `branches/hir/decisions/ADR-001..006` — design-decision records,
-  including all deviations from external standards.
+- [`references.md`](references.md) — bibliography plus notes on historical
+  ADR references that are not included in this checkout.

@@ -169,8 +169,11 @@ impl std::fmt::Display for Substrate {
         writeln!(f, "  D_DMI_surface = {:.3e} J/m²", self.d_dmi_surface)?;
         writeln!(f, "  alpha_pumping = {:.5}", self.alpha_pumping)?;
         writeln!(f, "  ΔMs_proximity = {:.3e} A/m", self.delta_ms_proximity)?;
-        writeln!(f, "  B_bias        = ({:.4}, {:.4}, {:.4}) T",
-                 self.b_exchange_bias[0], self.b_exchange_bias[1], self.b_exchange_bias[2])?;
+        writeln!(
+            f,
+            "  B_bias        = ({:.4}, {:.4}, {:.4}) T",
+            self.b_exchange_bias[0], self.b_exchange_bias[1], self.b_exchange_bias[2]
+        )?;
         writeln!(f, "  θ_SH          = {:.4}", self.spin_hall_angle)?;
         writeln!(f, "  τ_FL/τ_DL     = {:.3}", self.tau_fl_ratio)?;
         writeln!(f, "  notes: {}", self.notes)

@@ -15,12 +15,7 @@ use magnonic_clock_sim::gpu::GpuSolver;
 use magnonic_clock_sim::material::BulkMaterial;
 use magnonic_clock_sim::substrate::Substrate;
 
-fn run_case(
-    label: &str,
-    stack: Stack,
-    steps: usize,
-    interval: usize,
-) {
+fn run_case(label: &str, stack: Stack, steps: usize, interval: usize) {
     let config = SimConfig {
         stack,
         substrate: Substrate::vacuum(),
@@ -56,15 +51,28 @@ fn main() {
 
     // Case A: Nz=1 (regression)
     let stack_a = Stack::monolayer(fgt.clone(), 0.7e-9, [0.0, 0.0, 1.0]);
-    run_case("A — Nz=1 regression (fgt-bulk monolayer)", stack_a, 3000, 500);
+    run_case(
+        "A — Nz=1 regression (fgt-bulk monolayer)",
+        stack_a,
+        3000,
+        500,
+    );
 
     // Case B: Nz=2, J_inter = 0 (decoupled)
     let stack_b = Stack {
         layers: vec![
-            Layer { material: fgt.clone(), thickness: 0.7e-9, u_axis: [0.0, 0.0, 1.0] },
-            Layer { material: fgt.clone(), thickness: 0.7e-9, u_axis: [0.0, 0.0, 1.0] },
+            Layer {
+                material: fgt.clone(),
+                thickness: 0.7e-9,
+                u_axis: [0.0, 0.0, 1.0],
+            },
+            Layer {
+                material: fgt.clone(),
+                thickness: 0.7e-9,
+                u_axis: [0.0, 0.0, 1.0],
+            },
         ],
-        interlayer_a: vec![0.0],            // ZERO
+        interlayer_a: vec![0.0], // ZERO
         layer_spacing: vec![0.5e-9],
     };
     run_case("B — Nz=2 decoupled (J_inter = 0)", stack_b, 3000, 500);
@@ -74,25 +82,51 @@ fn main() {
     // With Ms=3.76e5, dz=0.7nm: A_inter = 4·Ms·dz²/2 ≈ 4e-13 J/m gives ~4.3 T.
     let stack_c = Stack {
         layers: vec![
-            Layer { material: fgt.clone(), thickness: 0.7e-9, u_axis: [0.0, 0.0, 1.0] },
-            Layer { material: fgt.clone(), thickness: 0.7e-9, u_axis: [0.0, 0.0, 1.0] },
+            Layer {
+                material: fgt.clone(),
+                thickness: 0.7e-9,
+                u_axis: [0.0, 0.0, 1.0],
+            },
+            Layer {
+                material: fgt.clone(),
+                thickness: 0.7e-9,
+                u_axis: [0.0, 0.0, 1.0],
+            },
         ],
-        interlayer_a: vec![4.0e-13],        // moderate ferromagnetic
+        interlayer_a: vec![4.0e-13], // moderate ferromagnetic
         layer_spacing: vec![0.7e-9],
     };
-    run_case("C — Nz=2 ferromagnetic coupled (J_inter = +4e-13 J/m)", stack_c, 3000, 500);
+    run_case(
+        "C — Nz=2 ferromagnetic coupled (J_inter = +4e-13 J/m)",
+        stack_c,
+        3000,
+        500,
+    );
 
     // Case D: Nz=2, antiferromagnetic coupling.
     // Same magnitude but negative. Ground state should have alternating layers.
     let stack_d = Stack {
         layers: vec![
-            Layer { material: fgt.clone(), thickness: 0.7e-9, u_axis: [0.0, 0.0, 1.0] },
-            Layer { material: fgt.clone(), thickness: 0.7e-9, u_axis: [0.0, 0.0, 1.0] },
+            Layer {
+                material: fgt.clone(),
+                thickness: 0.7e-9,
+                u_axis: [0.0, 0.0, 1.0],
+            },
+            Layer {
+                material: fgt.clone(),
+                thickness: 0.7e-9,
+                u_axis: [0.0, 0.0, 1.0],
+            },
         ],
-        interlayer_a: vec![-4.0e-13],       // antiferromagnetic
+        interlayer_a: vec![-4.0e-13], // antiferromagnetic
         layer_spacing: vec![0.7e-9],
     };
-    run_case("D — Nz=2 antiferromagnetic coupled (J_inter = -4e-13 J/m)", stack_d, 3000, 500);
+    run_case(
+        "D — Nz=2 antiferromagnetic coupled (J_inter = -4e-13 J/m)",
+        stack_d,
+        3000,
+        500,
+    );
 
     // Case E: CROSSED anisotropy axes. Layer 0 prefers +z, Layer 1 prefers +x.
     // Without coupling: each layer relaxes to its own easy axis → average
@@ -101,23 +135,49 @@ fn main() {
     // avg_mz and avg_mx both shift together toward one axis or intermediate.
     let stack_e0 = Stack {
         layers: vec![
-            Layer { material: fgt.clone(), thickness: 0.7e-9, u_axis: [0.0, 0.0, 1.0] }, // +z easy
-            Layer { material: fgt.clone(), thickness: 0.7e-9, u_axis: [1.0, 0.0, 0.0] }, // +x easy
+            Layer {
+                material: fgt.clone(),
+                thickness: 0.7e-9,
+                u_axis: [0.0, 0.0, 1.0],
+            }, // +z easy
+            Layer {
+                material: fgt.clone(),
+                thickness: 0.7e-9,
+                u_axis: [1.0, 0.0, 0.0],
+            }, // +x easy
         ],
         interlayer_a: vec![0.0],
         layer_spacing: vec![0.7e-9],
     };
-    run_case("E0 — Crossed easy axes, DECOUPLED (J_inter = 0)", stack_e0, 5000, 500);
+    run_case(
+        "E0 — Crossed easy axes, DECOUPLED (J_inter = 0)",
+        stack_e0,
+        5000,
+        500,
+    );
 
     let stack_e1 = Stack {
         layers: vec![
-            Layer { material: fgt.clone(), thickness: 0.7e-9, u_axis: [0.0, 0.0, 1.0] },
-            Layer { material: fgt.clone(), thickness: 0.7e-9, u_axis: [1.0, 0.0, 0.0] },
+            Layer {
+                material: fgt.clone(),
+                thickness: 0.7e-9,
+                u_axis: [0.0, 0.0, 1.0],
+            },
+            Layer {
+                material: fgt.clone(),
+                thickness: 0.7e-9,
+                u_axis: [1.0, 0.0, 0.0],
+            },
         ],
         interlayer_a: vec![4.0e-13],
         layer_spacing: vec![0.7e-9],
     };
-    run_case("E1 — Crossed easy axes, FM COUPLED (J_inter = +4e-13 J/m)", stack_e1, 5000, 500);
+    run_case(
+        "E1 — Crossed easy axes, FM COUPLED (J_inter = +4e-13 J/m)",
+        stack_e1,
+        5000,
+        500,
+    );
 
     println!("\n══════════════════════════════════════════");
     println!("M2 validation complete.");

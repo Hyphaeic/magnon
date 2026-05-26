@@ -30,7 +30,11 @@ pub struct M3tmState {
 
 impl M3tmState {
     pub fn at_ambient(t_ambient: f64, m_initial: f64) -> Self {
-        Self { t_e: t_ambient, t_p: t_ambient, m: m_initial }
+        Self {
+            t_e: t_ambient,
+            t_p: t_ambient,
+            m: m_initial,
+        }
     }
 }
 
@@ -49,7 +53,11 @@ pub fn advance_m3tm_cell(
     dt: f64,
 ) -> M3tmState {
     let r = params.r_koopmans_prefactor();
-    let k = M3tmDerivs { r, params, t_ambient };
+    let k = M3tmDerivs {
+        r,
+        params,
+        t_ambient,
+    };
 
     // Heun predictor: Euler step.
     let d1 = k.derivs(s, p_laser);
@@ -87,8 +95,8 @@ impl<'a> M3tmDerivs<'a> {
         // C_e(T_e) = γ_e · T_e; guard against T_e = 0.
         let c_e = (p.gamma_e * s.t_e).max(1.0);
         let dt_e = (p_laser - p.g_ep * (s.t_e - s.t_p)) / c_e;
-        let dt_p = (p.g_ep * (s.t_e - s.t_p) - p.g_sub_phonon * (s.t_p - self.t_ambient))
-            / p.c_p.max(1.0);
+        let dt_p =
+            (p.g_ep * (s.t_e - s.t_p) - p.g_sub_phonon * (s.t_p - self.t_ambient)) / p.c_p.max(1.0);
 
         let dm = if self.r.abs() < 1e-20 || s.t_e < 1.0 || p.t_c < 1e-12 {
             0.0
@@ -138,7 +146,12 @@ mod tests {
         }
         assert!((s.t_e - t_amb).abs() < 1e-3, "T_e drifted: {}", s.t_e);
         assert!((s.t_p - t_amb).abs() < 1e-3, "T_p drifted: {}", s.t_p);
-        assert!((s.m - m_eq).abs() < 1e-3, "m drifted: {} from {}", s.m, m_eq);
+        assert!(
+            (s.m - m_eq).abs() < 1e-3,
+            "m drifted: {} from {}",
+            s.m,
+            m_eq
+        );
     }
 
     #[test]
@@ -147,9 +160,9 @@ mod tests {
         // against the GPU in integration tests). Target: |m| drops to ≈ 0.60
         // at ~500 fs for 7 mJ/cm² on 20 nm Ni.
         let p = material_thermal::ni_m3tm();
-        let fluence = 70.0_f64;          // J/m² = 7 mJ/cm²
-        let fwhm = 100e-15_f64;          // 100 fs
-        let thickness = 20e-9_f64;       // 20 nm
+        let fluence = 70.0_f64; // J/m² = 7 mJ/cm²
+        let fwhm = 100e-15_f64; // 100 fs
+        let thickness = 20e-9_f64; // 20 nm
         let sigma = fwhm / 2.354_820_045;
         // Peak power density: F / thickness / (sigma·sqrt(2π))
         let p_peak = fluence / thickness / (sigma * (2.0 * std::f64::consts::PI).sqrt());

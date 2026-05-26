@@ -45,24 +45,24 @@ pub fn ni_m3tm() -> LayerThermalParams {
     let (m_e_table, chi_par_table) =
         brillouin_tables_spin_half_2d(t_c, DEFAULT_TABLE_N, DEFAULT_TABLE_N_B, DEFAULT_B_MAX_T);
     LayerThermalParams {
-        gamma_e: 1.065e3,   // J/(m³·K²); Lin/Zhigilei 2008
-        c_p: 3.0e6,         // J/(m³·K); Dulong-Petit near ambient for Ni
-        g_ep: 8.0e17,       // W/(m³·K); Koopmans 2010
-        g_sub_phonon: 3.0e16,  // τ_sub ≈ 100 ps for 20 nm Ni on sapphire
+        gamma_e: 1.065e3,     // J/(m³·K²); Lin/Zhigilei 2008
+        c_p: 3.0e6,           // J/(m³·K); Dulong-Petit near ambient for Ni
+        g_ep: 8.0e17,         // W/(m³·K); Koopmans 2010
+        g_sub_phonon: 3.0e16, // τ_sub ≈ 100 ps for 20 nm Ni on sapphire
         a_sf: 0.185,
         mu_atom_bohr: 0.6,
-        v_atom: 1.094e-29,  // m³; fcc Ni
+        v_atom: 1.094e-29, // m³; fcc Ni
         theta_d: 477.0,
         t_c,
-        alpha_0: 0.04,      // mid-range Ni Gilbert damping
+        alpha_0: 0.04, // mid-range Ni Gilbert damping
         llb_table_n: DEFAULT_TABLE_N,
         llb_table_n_b: DEFAULT_TABLE_N_B,
         b_max_t: DEFAULT_B_MAX_T,
         m_e_table,
         chi_par_table,
         tau_long_base: 0.3e-15,
-        tau_fast_base: 0.0,  // F2: 0 ⇒ collapse to F1 single-stage; recalibrate per-material for two-stage decay.
-        optical_skin_depth_m: 0.0,  // F3: 0 ⇒ uniform-absorption (pre-F3); reference value at 400 nm: 14 nm.
+        tau_fast_base: 0.0, // F2: 0 ⇒ collapse to F1 single-stage; recalibrate per-material for two-stage decay.
+        optical_skin_depth_m: 0.0, // F3: 0 ⇒ uniform-absorption (pre-F3); reference value at 400 nm: 14 nm.
         notes: "Ni M3TM, Koopmans 2010 verified; gamma_e/C_p from Lin-Zhigilei 2008.",
     }
 }
@@ -77,7 +77,7 @@ pub fn py_m3tm() -> LayerThermalParams {
         c_p: 3.5e6,
         g_ep: 1.0e18,
         g_sub_phonon: 3.0e16,
-        a_sf: 0.08,         // Battiato estimate for Py
+        a_sf: 0.08, // Battiato estimate for Py
         mu_atom_bohr: 1.0,
         v_atom: 1.18e-29,
         theta_d: 470.0,
@@ -89,8 +89,8 @@ pub fn py_m3tm() -> LayerThermalParams {
         m_e_table,
         chi_par_table,
         tau_long_base: 0.3e-15,
-        tau_fast_base: 0.0,  // F2: 0 ⇒ collapse to F1 single-stage; recalibrate per-material for two-stage decay.
-        optical_skin_depth_m: 0.0,  // F3 default; reference value at 400 nm: 16 nm.
+        tau_fast_base: 0.0, // F2: 0 ⇒ collapse to F1 single-stage; recalibrate per-material for two-stage decay.
+        optical_skin_depth_m: 0.0, // F3 default; reference value at 400 nm: 16 nm.
         notes: "Permalloy Ni80Fe20 M3TM, Battiato 2010 a_sf.",
     }
 }
@@ -102,13 +102,13 @@ pub fn fgt_ni_surrogate() -> LayerThermalParams {
     let (m_e_table, chi_par_table) =
         brillouin_tables_spin_half_2d(t_c, DEFAULT_TABLE_N, DEFAULT_TABLE_N_B, DEFAULT_B_MAX_T);
     LayerThermalParams {
-        gamma_e: 1.0e3,     // vdW metal, rough estimate
+        gamma_e: 1.0e3, // vdW metal, rough estimate
         c_p: 2.5e6,
         g_ep: 5.0e17,
-        g_sub_phonon: 2.0e16,  // weaker sink: vdW contact, worse thermal conduction
-        a_sf: 0.185,        // Ni surrogate — UNCALIBRATED for FGT
-        mu_atom_bohr: 1.6,  // Leon-Brito 2016 bulk Fe moment ≈ 1.6 μ_B
-        v_atom: 3.5e-29,    // FGT unit cell / atoms
+        g_sub_phonon: 2.0e16, // weaker sink: vdW contact, worse thermal conduction
+        a_sf: 0.185,          // Ni surrogate — UNCALIBRATED for FGT
+        mu_atom_bohr: 1.6,    // Leon-Brito 2016 bulk Fe moment ≈ 1.6 μ_B
+        v_atom: 3.5e-29,      // FGT unit cell / atoms
         theta_d: 220.0,
         t_c,
         alpha_0: 0.001,
@@ -118,8 +118,8 @@ pub fn fgt_ni_surrogate() -> LayerThermalParams {
         m_e_table,
         chi_par_table,
         tau_long_base: 0.3e-15,
-        tau_fast_base: 0.0,  // F2: 0 ⇒ collapse to F1 single-stage; recalibrate per-material for two-stage decay.
-        optical_skin_depth_m: 0.0,  // F3 default; reference value at 400 nm: 18 nm.
+        tau_fast_base: 0.0, // F2: 0 ⇒ collapse to F1 single-stage; recalibrate per-material for two-stage decay.
+        optical_skin_depth_m: 0.0, // F3 default; reference value at 400 nm: 18 nm.
         notes: "FGT thermal — Ni a_sf surrogate, UNCALIBRATED. Fit vs Zhou 2025 in P5.",
     }
 }
@@ -133,10 +133,10 @@ pub fn yig_inert() -> LayerThermalParams {
         gamma_e: 0.0,
         c_p: 3.5e6,
         g_ep: 0.0,
-        g_sub_phonon: 0.0,     // inert — no thermal coupling to worry about
-        a_sf: 0.0,          // insulator — no Elliott-Yafet
+        g_sub_phonon: 0.0, // inert — no thermal coupling to worry about
+        a_sf: 0.0,         // insulator — no Elliott-Yafet
         mu_atom_bohr: 5.0,
-        v_atom: 2.0e-28,    // garnet unit cell
+        v_atom: 2.0e-28, // garnet unit cell
         theta_d: 500.0,
         t_c,
         alpha_0: 3.0e-5,
@@ -146,14 +146,14 @@ pub fn yig_inert() -> LayerThermalParams {
         m_e_table,
         chi_par_table,
         tau_long_base: 0.3e-15,
-        tau_fast_base: 0.0,  // F2: 0 ⇒ collapse to F1 single-stage; recalibrate per-material for two-stage decay.
-        optical_skin_depth_m: 0.0,  // F3: YIG is largely transparent at visible; uniform mode is harmless because a_sf ≈ 0.
+        tau_fast_base: 0.0, // F2: 0 ⇒ collapse to F1 single-stage; recalibrate per-material for two-stage decay.
+        optical_skin_depth_m: 0.0, // F3: YIG is largely transparent at visible; uniform mode is harmless because a_sf ≈ 0.
         notes: "YIG inert — insulator, M3TM source effectively zero.",
     }
 }
 
 /// FGT — **Zhou 2025 morphology-calibrated** at the literal operating point
-/// (post-F1/F2/F3 — see ADR-006).
+/// (post-F1/F2/F3; see docs/calibration.md).
 ///
 /// Derived from `fgt_ni_surrogate` with four parameters tuned against
 /// Zhou et al. *Natl. Sci. Rev.* 12, nwaf185 (2025) aggregate morphology at
@@ -171,15 +171,16 @@ pub fn yig_inert() -> LayerThermalParams {
 pub fn fgt_zhou_calibrated() -> LayerThermalParams {
     let mut p = fgt_ni_surrogate();
     p.t_c = 210.0;
-    p.tau_long_base = 1.0e-15;     // F2 slow stage (was 3.0 fs at T=150K fit)
-    p.tau_fast_base = 0.3e-15;     // F2 fast stage (was 0; collapsed F1 path)
-    p.g_sub_phonon  = 3.0e17;      // F2 substrate sink (was 2e17)
-    p.optical_skin_depth_m = 18.0e-9;  // F3 FGT @ 400 nm
+    p.tau_long_base = 1.0e-15; // F2 slow stage (was 3.0 fs at T=150K fit)
+    p.tau_fast_base = 0.3e-15; // F2 fast stage (was 0; collapsed F1 path)
+    p.g_sub_phonon = 3.0e17; // F2 substrate sink (was 2e17)
+    p.optical_skin_depth_m = 18.0e-9; // F3 FGT @ 400 nm
     let (m_e, chi) =
         brillouin_tables_spin_half_2d(p.t_c, p.llb_table_n, p.llb_table_n_b, p.b_max_t);
     p.m_e_table = m_e;
     p.chi_par_table = chi;
-    p.notes = "FGT Zhou 2025 morphology fit at T=Tc=210K B=1T (post-F1/F2/F3, see docs/zhou_fgt_calibration.md + ADR-006).";
+    p.notes =
+        "FGT Zhou 2025 morphology fit at T=Tc=210K B=1T (post-F1/F2/F3, see docs/calibration.md).";
     p
 }
 
@@ -205,8 +206,8 @@ pub fn cofeb_m3tm() -> LayerThermalParams {
         m_e_table,
         chi_par_table,
         tau_long_base: 0.3e-15,
-        tau_fast_base: 0.0,  // F2: 0 ⇒ collapse to F1 single-stage; recalibrate per-material for two-stage decay.
-        optical_skin_depth_m: 0.0,  // F3 default; reference value at 400 nm: 17 nm.
+        tau_fast_base: 0.0, // F2: 0 ⇒ collapse to F1 single-stage; recalibrate per-material for two-stage decay.
+        optical_skin_depth_m: 0.0, // F3 default; reference value at 400 nm: 17 nm.
         notes: "CoFeB M3TM (Sato 2018 Bloch exponent β=1.73, a_sf fit).",
     }
 }
@@ -287,7 +288,6 @@ pub fn brillouin_tables_spin_half_2d(
     (m_e_table, chi_par_table)
 }
 
-
 /// Self-consistent solve of `m = tanh((m + h)·Tc/T)` with a reduced applied
 /// field `h = g·μ_B·B / (k_B·T_c)`. h = 0 reduces to the zero-field case.
 ///
@@ -339,17 +339,32 @@ mod tests {
     fn m_e_bounds_hold() {
         let p = ni_m3tm();
         // (T=0, B=0) corner.
-        assert!((p.sample_m_e_2d(0.0, 0.0) - 1.0).abs() < 1e-4, "m_e(0,0) should be ≈ 1");
+        assert!(
+            (p.sample_m_e_2d(0.0, 0.0) - 1.0).abs() < 1e-4,
+            "m_e(0,0) should be ≈ 1"
+        );
         // (T=1.5·Tc, B=0) corner — disordered paramagnet.
-        assert!(p.sample_m_e_2d(1.5 * p.t_c, 0.0).abs() < 1e-4, "m_e(1.5·Tc, 0) should be ≈ 0");
+        assert!(
+            p.sample_m_e_2d(1.5 * p.t_c, 0.0).abs() < 1e-4,
+            "m_e(1.5·Tc, 0) should be ≈ 0"
+        );
         // (T=Tc, B=0) — exactly at critical point, m_e = 0.
-        assert!(p.sample_m_e_2d(p.t_c, 0.0).abs() < 1e-3, "m_e(Tc, 0) should be ≈ 0");
+        assert!(
+            p.sample_m_e_2d(p.t_c, 0.0).abs() < 1e-3,
+            "m_e(Tc, 0) should be ≈ 0"
+        );
         // (T=Tc, B=b_max) — strong field lifts m_e well above zero.
         let m_at_tc_high_b = p.sample_m_e_2d(p.t_c, p.b_max_t);
-        assert!(m_at_tc_high_b > 0.05, "m_e(Tc, b_max) should be > 0.05; got {m_at_tc_high_b}");
+        assert!(
+            m_at_tc_high_b > 0.05,
+            "m_e(Tc, b_max) should be > 0.05; got {m_at_tc_high_b}"
+        );
         // (T=0.5·Tc, B=0) — well-magnetised; about 0.95 for spin-1/2 MFA.
         let m_lowt = p.sample_m_e_2d(0.5 * p.t_c, 0.0);
-        assert!(m_lowt > 0.85 && m_lowt < 1.0, "m_e(0.5Tc, 0) outside [0.85, 1.0]; got {m_lowt}");
+        assert!(
+            m_lowt > 0.85 && m_lowt < 1.0,
+            "m_e(0.5Tc, 0) outside [0.85, 1.0]; got {m_lowt}"
+        );
     }
 
     #[test]

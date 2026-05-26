@@ -53,7 +53,10 @@ fn run_trial(
     preset.t_c = t_c_override;
     preset.g_sub_phonon = g_sub_phonon;
     let (m_e, chi) = material_thermal::brillouin_tables_spin_half_2d(
-        preset.t_c, preset.llb_table_n, preset.llb_table_n_b, preset.b_max_t,
+        preset.t_c,
+        preset.llb_table_n,
+        preset.llb_table_n_b,
+        preset.b_max_t,
     );
     preset.m_e_table = m_e;
     preset.chi_par_table = chi;
@@ -64,7 +67,11 @@ fn run_trial(
     let mut cfg = SimConfig {
         stack,
         substrate: Substrate::vacuum(),
-        geometry: Geometry { nx: 1, ny: 1, cell_size: 20e-9 },
+        geometry: Geometry {
+            nx: 1,
+            ny: 1,
+            cell_size: 20e-9,
+        },
         dt: 5.0e-15,
         b_ext: [0.0, 0.0, 1.0], // 1 T perpendicular
         stab_coeff: 0.0,
@@ -75,10 +82,11 @@ fn run_trial(
         probe_idx: None,
         probe_layer: None,
     };
-    let pulse_spec = format!(
-        "t=2ps,fwhm=150fs,peak=0.0,dir=z,fluence={fluence_mj_cm2:.4},R={reflectivity:.3}"
-    );
-    cfg.photonic.pulses.push(parse_pulse_spec(&pulse_spec).unwrap());
+    let pulse_spec =
+        format!("t=2ps,fwhm=150fs,peak=0.0,dir=z,fluence={fluence_mj_cm2:.4},R={reflectivity:.3}");
+    cfg.photonic
+        .pulses
+        .push(parse_pulse_spec(&pulse_spec).unwrap());
     cfg.photonic.thermal = Some(ThermalConfig {
         t_ambient: t_ambient_k,
         per_layer: vec![preset.clone()],
@@ -113,15 +121,17 @@ fn run_trial(
     }
 
     // Reference |m|: just before the pulse (pulse peaks at 2 ps; ref at 1.5 ps).
-    let i_ref = traj_ps
-        .iter()
-        .position(|&t| t > 1.5)
-        .unwrap_or(0);
+    let i_ref = traj_ps.iter().position(|&t| t > 1.5).unwrap_or(0);
     let m_initial = traj_m[i_ref].max(1e-6);
-    let (m_floor, i_min) = traj_m.iter().enumerate().skip(i_ref).fold(
-        (m_initial, i_ref),
-        |(v, i), (j, x)| if *x < v { (*x, j) } else { (v, i) },
-    );
+    let (m_floor, i_min) =
+        traj_m
+            .iter()
+            .enumerate()
+            .skip(i_ref)
+            .fold(
+                (m_initial, i_ref),
+                |(v, i), (j, x)| if *x < v { (*x, j) } else { (v, i) },
+            );
     let demag_frac = 1.0 - m_floor / m_initial;
     let t_min_ps = traj_ps[i_min];
 
@@ -139,7 +149,10 @@ fn run_trial(
         );
         println!("  m_e({}K, B=1T) = {:.3}  (equilibrium)", t_ambient_k, m_eq);
         for t_target in [0.5_f64, 1.5, 2.0, 2.2, 3.0, 5.0, 10.0, 22.0, 40.0] {
-            let i = traj_ps.iter().position(|&t| t > t_target).unwrap_or(traj_ps.len() - 1);
+            let i = traj_ps
+                .iter()
+                .position(|&t| t > t_target)
+                .unwrap_or(traj_ps.len() - 1);
             println!(
                 "  t={:5.1}ps  |m|={:.4}  T_e={:6.1}K",
                 traj_ps[i], traj_m[i], traj_te[i]
@@ -147,7 +160,11 @@ fn run_trial(
         }
         println!(
             "  m_ref@{:.2}ps = {:.4}   m_floor = {:.4} @ t = {:.2} ps  demag = {:.1} %",
-            traj_ps[i_ref], m_initial, m_floor, t_min_ps, 100.0 * demag_frac
+            traj_ps[i_ref],
+            m_initial,
+            m_floor,
+            t_min_ps,
+            100.0 * demag_frac
         );
         println!("  m(22 ps after pulse) = {:.4}", m_at_22ps);
     }
