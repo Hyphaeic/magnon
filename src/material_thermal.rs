@@ -63,6 +63,9 @@ pub fn ni_m3tm() -> LayerThermalParams {
         tau_long_base: 0.3e-15,
         tau_fast_base: 0.0, // F2: 0 ⇒ collapse to F1 single-stage; recalibrate per-material for two-stage decay.
         optical_skin_depth_m: 0.0, // F3: 0 ⇒ uniform-absorption (pre-F3); reference value at 400 nm: 14 nm.
+        lambda_bath: 0.0,
+        k_u_exponent: 3.0,
+        a_ex_exponent: 2.0,
         notes: "Ni M3TM, Koopmans 2010 verified; gamma_e/C_p from Lin-Zhigilei 2008.",
     }
 }
@@ -91,6 +94,9 @@ pub fn py_m3tm() -> LayerThermalParams {
         tau_long_base: 0.3e-15,
         tau_fast_base: 0.0, // F2: 0 ⇒ collapse to F1 single-stage; recalibrate per-material for two-stage decay.
         optical_skin_depth_m: 0.0, // F3 default; reference value at 400 nm: 16 nm.
+        lambda_bath: 0.0,
+        k_u_exponent: 3.0,
+        a_ex_exponent: 2.0,
         notes: "Permalloy Ni80Fe20 M3TM, Battiato 2010 a_sf.",
     }
 }
@@ -120,6 +126,9 @@ pub fn fgt_ni_surrogate() -> LayerThermalParams {
         tau_long_base: 0.3e-15,
         tau_fast_base: 0.0, // F2: 0 ⇒ collapse to F1 single-stage; recalibrate per-material for two-stage decay.
         optical_skin_depth_m: 0.0, // F3 default; reference value at 400 nm: 18 nm.
+        lambda_bath: 0.0,
+        k_u_exponent: 3.0,
+        a_ex_exponent: 2.0,
         notes: "FGT thermal — Ni a_sf surrogate, UNCALIBRATED. Fit vs Zhou 2025 in P5.",
     }
 }
@@ -148,39 +157,55 @@ pub fn yig_inert() -> LayerThermalParams {
         tau_long_base: 0.3e-15,
         tau_fast_base: 0.0, // F2: 0 ⇒ collapse to F1 single-stage; recalibrate per-material for two-stage decay.
         optical_skin_depth_m: 0.0, // F3: YIG is largely transparent at visible; uniform mode is harmless because a_sf ≈ 0.
+        lambda_bath: 0.0,
+        k_u_exponent: 3.0,
+        a_ex_exponent: 2.0,
         notes: "YIG inert — insulator, M3TM source effectively zero.",
     }
 }
 
-/// FGT — **Zhou 2025 morphology-calibrated** at the literal operating point
-/// (post-F1/F2/F3; see docs/calibration.md).
+/// FGT — **Zhou 2025 morphology-calibrated**, Phase F4 (Atxitia LLB).
 ///
-/// Derived from `fgt_ni_surrogate` with four parameters tuned against
-/// Zhou et al. *Natl. Sci. Rev.* 12, nwaf185 (2025) aggregate morphology at
-/// T = T_c = 210 K, B_z = 1 T, F = 0.24 mJ/cm², 150 fs pulse on a 5 nm flake.
-/// The pre-F1 calibration ran at T = 150 K because the zero-field tables
-/// made T = T_c degenerate; F1's 2D (T, B) tables remove that obstruction
-/// so this preset now reflects Zhou's actual experimental conditions.
+/// Derived from `fgt_ni_surrogate` and fit against Zhou et al. *Natl. Sci.
+/// Rev.* 12, nwaf185 (2025) aggregate morphology at T = T_c = 210 K,
+/// B_z = 1 T, F = 0.24 mJ/cm², 150 fs pulse on a 5 nm flake
+/// (`examples/test_zhou_fgt_calibrate.rs`).
 ///
-/// Fit numbers (best-fit grid point from `examples/test_zhou_fgt_calibrate.rs`):
-///   demag fraction          = 77.6 % (Zhou target 79 %)
-///   recovery fraction @22ps = 55.2 % (Zhou target ≈ 55 %)
-///   Loss = 0.0002 (35× tighter than the pre-F1 best of 0.0070).
+/// F4 replaces the phenomenological `tau_long`/`tau_fast` relaxation with
+/// the Garanin/Atxitia longitudinal torque driven by χ_∥(T, B), so the
+/// only dynamic-physics knob is the bath coupling λ. K_u follows
+/// Callen-Callen (κ = 3) and α_⊥ stays finite above T_c.
 ///
-/// Use this preset with reflectivity = 0.50 applied on the pulse spec.
+/// F4 grid best fit (λ × R × g_sub, 48 trials):
+///   λ = 0.3, R = 0.70, g_sub = 6·10¹⁶ W/(m³·K)
+///   demag fraction          = 93.2 % (Zhou target 79 %)
+///   recovery fraction @22ps = 47.1 % (Zhou target ≈ 55 %)
+///   Loss = 0.023 — the loss floor is set by the demag *depth*, which the
+///   model over-predicts at every λ: |m|_floor tracks m_e(T_e^peak, 1 T)
+///   of the spin-½ MFA table (≈ 0.013–0.025), while Zhou's 79 % implies a
+///   floor near 0.055. See docs/calibration.md §3 for the reading of this.
+///
+/// Compared with the pre-F4 fit (g_sub = 3·10¹⁷, R = 0.50, loss 0.0002),
+/// g_sub moved 5× toward the Kapitza estimate for a 5 nm vdW flake
+/// (≈ 1–2·10¹⁶), at the cost of a worse fit — fewer knobs, more physics.
+///
+/// Use this preset with reflectivity = 0.70 applied on the pulse spec.
 pub fn fgt_zhou_calibrated() -> LayerThermalParams {
     let mut p = fgt_ni_surrogate();
     p.t_c = 210.0;
-    p.tau_long_base = 1.0e-15; // F2 slow stage (was 3.0 fs at T=150K fit)
-    p.tau_fast_base = 0.3e-15; // F2 fast stage (was 0; collapsed F1 path)
-    p.g_sub_phonon = 3.0e17; // F2 substrate sink (was 2e17)
+    p.lambda_bath = 0.3; // F4 Atxitia bath coupling (grid best fit)
+    p.k_u_exponent = 3.0; // Callen-Callen single-ion uniaxial
+    p.a_ex_exponent = 2.0; // MFA; irrelevant for the 1×1 calibration cell
+    p.tau_long_base = 0.0; // legacy knobs inert when lambda_bath > 0
+    p.tau_fast_base = 0.0;
+    p.g_sub_phonon = 6.0e16; // F4 substrate sink (pre-F4 fit: 3e17)
     p.optical_skin_depth_m = 18.0e-9; // F3 FGT @ 400 nm
     let (m_e, chi) =
         brillouin_tables_spin_half_2d(p.t_c, p.llb_table_n, p.llb_table_n_b, p.b_max_t);
     p.m_e_table = m_e;
     p.chi_par_table = chi;
     p.notes =
-        "FGT Zhou 2025 morphology fit at T=Tc=210K B=1T (post-F1/F2/F3, see docs/calibration.md).";
+        "FGT Zhou 2025 morphology fit at T=Tc=210K B=1T, F4 Atxitia LLB (see docs/calibration.md).";
     p
 }
 
@@ -208,6 +233,9 @@ pub fn cofeb_m3tm() -> LayerThermalParams {
         tau_long_base: 0.3e-15,
         tau_fast_base: 0.0, // F2: 0 ⇒ collapse to F1 single-stage; recalibrate per-material for two-stage decay.
         optical_skin_depth_m: 0.0, // F3 default; reference value at 400 nm: 17 nm.
+        lambda_bath: 0.0,
+        k_u_exponent: 3.0,
+        a_ex_exponent: 2.0,
         notes: "CoFeB M3TM (Sato 2018 Bloch exponent β=1.73, a_sf fit).",
     }
 }
@@ -234,6 +262,10 @@ pub fn cofeb_m3tm() -> LayerThermalParams {
 //
 // At T = 0 we hard-set m_e = 1 and χ_∥ = 0 for any B.
 
+/// g·μ_B / k_B in K/T  ≈ 2 · 9.274e-24 / 1.381e-23 ≈ 1.343 K/T.
+/// Converts the dimensionless-per-Kelvin χ_∥ table to χ̃_∥ in 1/T.
+pub const ZEEMAN_K_PER_T: f64 = 1.343;
+
 /// Backward-compatibility 1D builder. Returns the B = 0 slice of the new
 /// 2D tables. Length n.
 pub fn brillouin_tables_spin_half(t_c: f64, n: usize) -> (Vec<f32>, Vec<f32>) {
@@ -249,8 +281,6 @@ pub fn brillouin_tables_spin_half_2d(
     n_b: usize,
     b_max_t: f64,
 ) -> (Vec<f32>, Vec<f32>) {
-    // g·μ_B / k_B in K/T  ≈ 2 · 9.274e-24 / 1.381e-23 ≈ 1.343 K/T.
-    const ZEEMAN_K_PER_T: f64 = 1.343;
     let n_b = n_b.max(1);
     let mut m_e_table = Vec::with_capacity(n_t * n_b);
     let mut chi_par_table = Vec::with_capacity(n_t * n_b);

@@ -339,9 +339,10 @@ thermal is off (so the layout stays consistent).
 | `yig` (= `yig-inert`) | 560 | 0 | 0 | Insulator; no M3TM dynamics |
 | `cofeb` | 1100 | 0.15 | 1.1·10¹⁸ | Sato 2018 |
 
-The `fgt-zhou` preset additionally sets `tau_long_base = 1.0 fs`,
-`tau_fast_base = 0.3 fs`, `g_sub_phonon = 3·10¹⁷`,
-`optical_skin_depth_m = 18 nm`. See [`calibration.md`](calibration.md)
+The `fgt-zhou` preset additionally sets `lambda_bath = 0.3` (F4
+Atxitia longitudinal torque), `g_sub_phonon = 6·10¹⁶`,
+`optical_skin_depth_m = 18 nm`, κ = 3; use it with `R=0.70` on the
+pulse spec. See [`calibration.md`](calibration.md)
 for the procedure that derived these values.
 
 ---

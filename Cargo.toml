@@ -48,6 +48,10 @@ name = "test_optical_skin_depth"
 path = "examples/test_optical_skin_depth.rs"
 
 [[example]]
+name = "test_llb_atxitia_gpu_vs_host"
+path = "examples/test_llb_atxitia_gpu_vs_host.rs"
+
+[[example]]
 name = "test_m2_coupling"
 path = "examples/test_m2_coupling.rs"
 

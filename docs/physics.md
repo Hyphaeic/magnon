@@ -21,7 +21,8 @@ Two integration paths share the same effective-field assembly:
 - **LLB + M3TM path** (opt-in): per-cell electron and phonon
   temperatures evolve under the Koopmans 2010 M3TM equations; |m| is
   free to vary and relaxes toward a field-dependent equilibrium under
-  a phenomenological two-stage longitudinal torque.
+  an Atxitia (χ_∥-driven) longitudinal torque; a phenomenological
+  two-stage form remains selectable.
 
 This document maps each piece of the model to the source files that
 implement it. It is the place to start if you want to understand
@@ -125,8 +126,9 @@ this kernel:
    when `tau_fast_base ≤ 0`.
 5. Writes back `(T_e_new, T_p_new, m_reduced_new, m_target_new)`.
 
-The LLB longitudinal torque then drives `|m|` toward `m_target` (not
-toward `m_e` directly) on the slow timescale `tau_long_base / α_∥(T)`.
+The LLB longitudinal torque then drives `|m|`: in F4 Atxitia mode
+(`lambda_bath > 0`) toward `m_e(T_e, B)` at the χ_∥-derived rate; in the
+legacy mode toward `m_target` on the timescale `tau_long_base / α_∥(T)`.
 The LLB path uses `T_e` as the effective spin temperature for
 `α_⊥(T)`, `α_∥(T)`, and `m_e(T, B)`. This is a modelling approximation:
 there is no separate spin-temperature state or spin-bath equilibration
@@ -189,11 +191,35 @@ Why this matters: Zhou 2025 reports two distinct decay timescales
 relaxation cannot reproduce the morphology; F2 introduces the
 necessary degree of freedom.
 
-Honest caveat: this is not the full Atxitia LLB longitudinal torque
-(χ_∥-coupled effective-field form). It's a phenomenological chain that
-gives the right number of timescales but does not derive them from a
-free-energy functional. The χ_∥ table is computed and uploaded but not
-read. See §6.3 below.
+Status after F4: this chain is the **legacy** path, selected by
+`lambda_bath ≤ 0`. The Atxitia form (§5.4) produces the two timescales
+without extra knobs — fast demag while T_e is hot, recovery limited by
+critical slowing down near T_c and by substrate cooling.
+
+### 5.4 F4 — Atxitia longitudinal torque, λ, K(T), A(T), α_⊥ above T_c
+
+Four changes, all in the LLB path only:
+
+1. **Longitudinal torque** from the MFA free energy
+   (`H_∥ = (1 − m²/m_e²)/(2χ̃_∥)`, [`equations.md`](equations.md) §1.2),
+   reading the χ_∥(T, B) table that F1 already uploaded. The
+   sub-femtosecond `tau_long`/`tau_fast` constants are gone from the
+   fitted preset.
+2. **Separate bath coupling λ** (`lambda_bath`) for `α_∥ = 2λT/3T_c`.
+   The FMR Gilbert damping `alpha_0` (0.001 for FGT) keeps governing
+   `α_⊥`; λ for metals is 0.02–0.3 and is the calibration knob.
+3. **Callen–Callen anisotropy** `K ∝ m_e^κ` (κ = 3) and
+   `A ∝ m_e^a` (a = 2) via per-layer exponents. At the Zhou point
+   (m_e ≈ 0.26) the anisotropy field drops from 7.8 T to ≈ 0.5 T.
+4. **α_⊥ above T_c** switches to `α_0·2T/3T_c` instead of going
+   negative and being clamped to zero.
+
+The transverse damping in Atxitia mode is Garanin's
+`−γ α_⊥ m̂×(m̂×B)` (no extra |m| factor, no `1/(1+α²)`).
+
+Verification: `src/llb_host.rs` is a single-cell host integrator of
+the same equations; `examples/test_llb_atxitia_gpu_vs_host.rs` shows the
+GPU kernel tracks it to |Δ|m|| < 4·10⁻⁶ over 15 ps at the Zhou point.
 
 ### 5.3 F3 — Beer–Lambert per-layer absorption
 
@@ -248,26 +274,19 @@ cells overheat and stay hot. F3 fixes the volumetric distribution but
 not the lateral transport. This is queued as a future P6+ item per the
 original plan.
 
-### 6.3 LLB longitudinal torque is phenomenological
+### 6.3 Legacy longitudinal torque is phenomenological
 
-The shipped form is an exponential relaxation toward `m_target` with
-rate `α_∥(T) / tau_long_base`. It reduces correctly to LLG at T = 0
-and produces the right qualitative ultrafast-demag morphology. But
-the rate has no derivation from a free-energy functional — `tau_long_base`
-is a fit parameter masquerading as a material constant.
+With `lambda_bath ≤ 0` the LLB uses the pre-F4 exponential relaxation
+toward `m_target` with rate `α_∥(T) / tau_long_base`; `tau_long_base`
+is a fit parameter masquerading as a material constant. All presets
+except `fgt-zhou` still default to this path (λ = 0) so their gate
+numbers are unchanged; set `lambda_bath > 0` to use the Atxitia form
+(§5.4), which has no such constant.
 
-The "proper" longitudinal torque per Atxitia 2011 uses χ_∥ as an
-effective-field prefactor:
-
-```
-d|m|/dt|_long_atxitia = γ · α_∥ · χ_∥⁻¹ · ( 1 − m²/m_e² ) · m̂ / 2
-```
-
-The χ_∥ table is computed (now as a 2D function of T, B per F1) and
-uploaded to the GPU, but the shader does not read it. Replacing the
-phenomenological form with the Atxitia form is mechanical (~50 LOC
-shader change) and would require recalibrating every M3TM preset.
-Queued as a future upgrade.
+Remaining simplifications of the F4 form: the longitudinal projections
+of the exchange and anisotropy fields are dropped; `T_e` is used as the
+spin temperature; the longitudinal rate is clipped at low T where the
+MFA `χ̃_∥` underflows (§5.4). The stochastic (Langevin) terms are absent.
 
 ### 6.4 DMI has no chiral edge boundary condition
 
@@ -301,13 +320,20 @@ trend exploration only.
 ### 6.7 `a_sf` is inert under the LLB back-coupling path
 
 When `enable_llb = true`, the M3TM Koopmans dm/dt term is replaced by
-the LLB longitudinal torque, which uses `m_target` (not the M3TM track)
-as the demagnetisation driver. Consequence: `a_sf` does not affect the
-demagnetisation depth in any LLB-active simulation. The only way `a_sf`
-re-enters the dynamics is
-either (i) via `enable_llb = false` (which removes the F2 two-stage
-chain), or (ii) via the future Atxitia LLB form where χ_∥ implicitly
-carries `a_sf` through R.
+the LLB longitudinal torque (either form), so `a_sf` does not affect
+the demagnetisation depth in any LLB-active simulation. In the F4 form
+the role of the Koopmans R is played by λ; a_sf only matters with
+`enable_llb = false`.
+
+### 6.9 LLB tables stop at 1.5·T_c
+
+`m_e(T, B)` and `χ_∥(T, B)` are tabulated on `T ∈ [0, 1.5·T_c]`; hotter
+cells read the last row. At the Zhou point T_e peaks at 310–420 K
+(1.5·T_c = 315 K), so during the ~1 ps electron spike `m_e` is held at
+its 315 K value (≈ 0.013 at 1 T) instead of falling further, and
+`χ̃_∥` is up to 2× too large. This bounds the demag floor from below
+and slightly slows the hot-phase relaxation. Extending the axis costs
+T resolution near T_c unless the row count is raised.
 
 ### 6.8 Spin-pumping is thickness-independent
 
@@ -320,20 +346,32 @@ Thickness-sweep linewidth conclusions need this caveat.
 
 ## 7. Where calibration is honest, where it isn't
 
-The `fgt_zhou_calibrated` preset has been re-fit at the **literal**
-Zhou 2025 operating point (T = T_c = 210 K, B_z = 1 T, F = 0.24 mJ/cm²,
-150 fs FWHM, 5 nm flake) using all three F-tier upgrades. The fit hits
-both target observables to within rounding (1.4 pp on demag, 0.2 pp
-on recovery; loss 0.0002).
+The `fgt_zhou_calibrated` preset is now an F4 fit with three handles
+(λ, R, g_sub) instead of the pre-F4 four (`tau_long`, `tau_fast`, R,
+g_sub). At the literal Zhou operating point (T = T_c = 210 K,
+B_z = 1 T, F = 0.24 mJ/cm², 150 fs, 5 nm) the best fit is
+λ = 0.3, R = 0.70, g_sub = 6·10¹⁶ with demag 93 % (target 79 %),
+recovery 47 % (target 55 %), loss 0.023.
 
-**This is a single-operating-point morphology fit.** Two parameters
-(`tau_fast`, `R`) trade off against each other in the broad Loss < 0.01
-basin. The preset is NOT validated for cross-fluence or cross-temperature
-extrapolation. Any prediction outside the exact fitted point
-(T = 210 K, B_z = 1 T, F = 0.24 mJ/cm², 150 fs FWHM, 5 nm FGT) is an
-exploratory extrapolation; treat it with appropriate scepticism.
+**The model now over-predicts the demag depth at every λ.** The floor
+tracks `m_e(T_e^peak, 1 T)` of the spin-½ MFA table (0.013–0.025)
+while Zhou's 79 % implies ≈ 0.055. Scanning the incident fluence shows
+the discrepancy is in the energy delivered to the spins, not in the
+relaxation dynamics: at F = 0.06 mJ/cm² the fit lands at λ = 0.3,
+R = 0.50, g_sub = 2·10¹⁶ (the Kapitza estimate for a 5 nm vdW flake)
+with demag 79.8 % and recovery 63 %, loss 0.003. Candidate causes, in
+order of likelihood: thin-film optics (a 5 nm flake on a substrate does
+not absorb like a semi-infinite Beer–Lambert slab), the MFA
+`m_e(T > T_c, B)` under-estimating the field-induced moment of a
+quasi-2D magnet, and the 1.5·T_c table clamp (§6.9).
 
-See [`calibration.md`](calibration.md) for the full procedure and
+Read as: the relaxation physics (λ ≈ 0.3, g_sub ≈ 2–6·10¹⁶) is now
+in the physically expected range, and the residual is a well-posed
+question about absorbed energy and the equilibrium curve. The preset is
+still a single-operating-point fit and is not validated for
+cross-fluence or cross-temperature extrapolation.
+
+See [`calibration.md`](calibration.md) for the grids and
 [`references.md`](references.md) for the Zhou citation.
 
 ---
@@ -341,7 +379,7 @@ See [`calibration.md`](calibration.md) for the full procedure and
 ## 8. Performance envelope
 
 On an NVIDIA RTX 4060 with the current bind-group layout (12 entries,
-GpuParams = 736 B):
+GpuParams = 800 B):
 
 | Path | Throughput @ 256² grid |
 |---|---|

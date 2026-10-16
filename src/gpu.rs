@@ -179,11 +179,19 @@ struct GpuParams {
     layer_optical_atten: [f32; 4],
     // 736-751: per-layer gyromagnetic ratio [rad/(s·T)].
     layer_gammas: [f32; 4],
+    // 752-767: per-layer LLB bath coupling λ (Phase F4). > 0 selects the
+    // Garanin/Atxitia longitudinal torque driven by χ_∥; ≤ 0 keeps the
+    // legacy phenomenological relaxation toward `m_target`.
+    layer_thermal_lambda: [f32; 4],
+    // 768-783: per-layer Callen-Callen anisotropy exponent κ (K ∝ m_e^κ).
+    layer_thermal_k_exp: [f32; 4],
+    // 784-799: per-layer exchange-stiffness exponent a (A ∝ m_e^a).
+    layer_thermal_a_exp: [f32; 4],
 }
 
 const OFFSET_PULSE_AMPLITUDES: u64 = 400;
 const OFFSET_DT: u64 = 16;
-const OFFSET_GPUPARAMS_END: u64 = 752;
+const OFFSET_GPUPARAMS_END: u64 = 800;
 const _: () = assert!(OFFSET_GPUPARAMS_END as usize == std::mem::size_of::<GpuParams>());
 
 impl GpuParams {
@@ -339,6 +347,9 @@ impl GpuParams {
             layer_thermal_tau_fast: Self::thermal_vec4(cfg, |p| p.tau_fast_base as f32),
             layer_optical_atten: Self::compute_optical_atten(cfg),
             layer_gammas,
+            layer_thermal_lambda: Self::thermal_vec4(cfg, |p| p.lambda_bath as f32),
+            layer_thermal_k_exp: Self::thermal_vec4(cfg, |p| p.k_u_exponent as f32),
+            layer_thermal_a_exp: Self::thermal_vec4(cfg, |p| p.a_ex_exponent as f32),
         }
     }
 
@@ -1417,6 +1428,22 @@ impl GpuSolver {
     /// Re-upload magnetization: alternating +z / -z through the stack layers.
     /// Layer 0 → +z, Layer 1 → -z, Layer 2 → +z, etc. (with 5° random cone).
     /// Natural initial condition for synthetic-AFM heterostructures.
+    /// Uniform +z initial state with |m| = `m0` on every cell. Use with
+    /// `enable_llb` to start at the thermal equilibrium m_e(T_ambient, B)
+    /// instead of |m| = 1, which avoids a spurious relaxation transient.
+    pub fn reset_uniform_z_at(&mut self, m0: f32) {
+        let mut data = Self::init_magnetization(&self.config);
+        for cell in 0..self.cell_count as usize {
+            data[cell * 4] *= m0;
+            data[cell * 4 + 1] *= m0;
+            data[cell * 4 + 2] *= m0;
+        }
+        self.queue
+            .write_buffer(&self.mag_buf, 0, bytemuck::cast_slice(&data));
+        self.step = 0;
+        self.t_sim = 0.0;
+    }
+
     pub fn reset_uniform_z_alternating(&mut self) {
         use rand::Rng;
         let n = self.cell_count as usize;

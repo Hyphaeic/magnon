@@ -1,15 +1,17 @@
 # Calibration: Zhou-2025 FGT and how to fit new materials
 
 Read [`physics.md`](physics.md) §6 first for the trust-boundary
-discussion. Calibration here means **fitting free parameters of the
-shipped phenomenological model to a specific experiment** — not
-deriving parameters from first principles.
+discussion. Calibration here means **fitting the few free parameters of the
+shipped model to a specific experiment** — not deriving parameters
+from first principles. Since F4 the LLB longitudinal dynamics are the
+Garanin/Atxitia form, so the fit handles are a bath coupling λ, the
+pulse reflectivity R and the substrate sink g_sub.
 
 ---
 
 ## 1. The shipped FGT calibration
 
-`material_thermal::fgt_zhou_calibrated()` is a four-parameter fit to
+`material_thermal::fgt_zhou_calibrated()` is a three-parameter F4 fit to
 Zhou et al. *Natl. Sci. Rev.* 12, nwaf185 (2025) at the literal
 operating point.
 
@@ -50,51 +52,60 @@ L = ( demag_frac − 0.79 )² + 0.5 · ( recovery_frac − 0.55 )²
 The recovery target carries 0.5× weight because Zhou's τ₂ varies
 across temperature and the target is more of a band than a point.
 
-### 1.3 Fit parameters and grid
+### 1.3 Fit parameters and grid (F4)
 
-4-axis grid search over the dynamic-physics knobs:
+3-axis grid over the dynamic-physics knobs:
 
 | Parameter | Grid values | What it controls |
 |---|---|---|
-| `tau_long_base` | 1.0, 3.0, 10.0 fs | LLB slow stage; |m| chases m_target on this |
-| `tau_fast_base` (F2) | 0.1, 0.3, 1.0 fs | LLB fast stage; m_target chases m_e on this |
+| `lambda_bath` (λ) | 0.03, 0.1, 0.3, 1.0 | α_∥ = 2λT/3T_c; longitudinal rate γα_∥/χ̃_∥ |
 | `reflectivity` (pulse) | 0.30, 0.50, 0.70 | absorbed-power compensator |
-| `g_sub_phonon` | 1·10¹⁷, 3·10¹⁷, 1·10¹⁸ W/(m³·K) | substrate sink → recovery τ₂ |
+| `g_sub_phonon` | 2·10¹⁶, 6·10¹⁶, 2·10¹⁷, 6·10¹⁷ W/(m³·K) | substrate sink → recovery |
 
-3×3×3×3 = 81 trials. Wall-clock ≈ 13 minutes on an RTX 4060.
+4×3×4 = 48 trials, 1.6 s on the host reference (`--cpu`), a few
+minutes on a GPU. The run starts at `|m| = m_e(210 K, 1 T) = 0.264`
+(thermal equilibrium) rather than `|m| = 1`. κ = 3, δ = 18 nm fixed.
 
-`optical_skin_depth_m` is fixed at 18 nm — it's a measured optical
-constant, not a fit handle.
+`tau_long_base` / `tau_fast_base` are no longer fit: they are inert
+when `lambda_bath > 0`. `a_sf` remains inert under `enable_llb`.
 
-`a_sf` is **not** in the grid because the Koopmans dm/dt term is
-replaced by the LLB longitudinal torque under `enable_llb=true`, so
-`a_sf` is inert.
+### 1.4 Fit result (F4)
 
-### 1.4 Fit result
+Best-fit point at the literal fluence (`fgt_zhou_calibrated()`):
 
-Best-fit point (`fgt_zhou_calibrated()`):
+| Parameter | Value | Physical expectation |
+|---|---|---|
+| `lambda_bath` | 0.3 | 0.02–0.3 for metals |
+| `g_sub_phonon` | 6 · 10¹⁶ W/(m³·K) | G/t ≈ 1–2·10¹⁶ for G = 50–100 MW m⁻² K⁻¹, t = 5 nm |
+| reflectivity (on pulse) | 0.70 | ≈ 0.5 expected |
+| `optical_skin_depth_m` | 18 nm | measured optical constant |
 
-| Parameter | Value |
-|---|---|
-| `tau_long_base` | 1.0 · 10⁻¹⁵ s |
-| `tau_fast_base` | 0.3 · 10⁻¹⁵ s |
-| `g_sub_phonon` | 3.0 · 10¹⁷ W/(m³·K) |
-| `optical_skin_depth_m` | 1.8 · 10⁻⁸ m |
-| reflectivity (on pulse) | 0.50 |
+| Observable | Simulated | Zhou target |
+|---|---|---|
+| demag_frac | 0.932 | 0.79 |
+| recovery_frac at 22 ps | 0.471 | 0.55 |
+| **Loss** | **0.023** | 0 |
 
-Achieved observables:
+The loss floor is set by the demag depth: every λ ≥ 0.1 gives
+92–95 % because `|m|_floor` follows `m_e(T_e^peak, 1 T)` of the MFA
+table. The pre-F4 four-knob fit reached loss 0.0002 by pushing
+`g_sub` to 3·10¹⁷ (15× the Kapitza estimate) and using sub-fs τ's.
 
-| Observable | Simulated | Zhou target | Residual |
-|---|---|---|---|
-| demag_frac | 0.776 | 0.79 | 1.4 pp |
-| recovery_frac at 22 ps | 0.552 | 0.55 | 0.2 pp |
-| **Loss** | **0.0002** | 0 | — |
+**Fluence scan.** Re-running the grid with the incident fluence
+reduced (`--fluence`) isolates where the residual lives:
 
-**Top-4 cluster width.** Loss < 0.0024 for the four best trials, all
-sharing `(tau_long = 1 fs, g_sub = 3·10¹⁷)` and spanning
-`tau_fast ∈ {0.1, 0.3, 1} fs × R ∈ {0.3, 0.5}`. Two parameters
-(`tau_long`, `g_sub`) are well-constrained; (`tau_fast`, `R`) trade
-off against each other.
+| F (mJ/cm²) | best λ | best R | best g_sub | demag | rec@22 ps | loss |
+|---|---|---|---|---|---|---|
+| 0.24 (nominal) | 0.3 | 0.70 | 6·10¹⁶ | 0.932 | 0.471 | 0.023 |
+| 0.12 | 0.3 | 0.50 | 6·10¹⁶ | 0.916 | 0.527 | 0.016 |
+| 0.06 | 0.3 | 0.50 | 2·10¹⁶ | 0.798 | 0.626 | 0.003 |
+
+At a quarter of the nominal absorbed energy the fit is at the expected
+R, at the Kapitza g_sub, and reproduces the demag depth. The open
+question is therefore the energy actually deposited in the spin system
+of a 5 nm flake (thin-film optics, substrate reflections) and the
+shape of `m_e(T > T_c, B)` beyond spin-½ MFA — see
+[`physics.md`](physics.md) §7.
 
 ### 1.5 Trust boundaries
 
@@ -163,8 +174,7 @@ The parameters that are genuinely fit:
 
 | Parameter | Range to grid | What it shifts |
 |---|---|---|
-| `tau_long_base` | 0.1 – 10 fs | LLB slow timescale |
-| `tau_fast_base` | 0.1 – 3 fs | LLB fast timescale (F2) |
+| `lambda_bath` | 0.03 – 1 | LLB bath coupling (longitudinal rate) |
 | `g_sub_phonon` | 1·10¹⁶ – 1·10¹⁸ W/(m³·K) | recovery time τ_sub |
 | `reflectivity` | 0.0 – 0.85 | absorbed-power compensator |
 
@@ -226,9 +236,9 @@ If a refit at a new operating point gives **dramatically different**
 parameters from the existing one, the model is being asked to do
 something it can't. Typical signatures:
 
-- **Runaway tau_fast → 0** in a high-fluence fit: Zhou's two-stage
-  morphology probably collapses to a single timescale at higher F,
-  and the F2 chain has no degree of freedom that captures this.
+- **Runaway λ → ∞** or a loss floor set by the demag depth: the
+  equilibrium curve `m_e(T, B)` or the absorbed energy is wrong, not
+  the relaxation rate (this is the F4 situation at nominal fluence).
 - **Loss floor stays > 0.1**: the morphology can't be reproduced
   regardless of parameters. Likely missing physics — most likely
   candidates: optical skin-depth (verify δ at wavelength), demag

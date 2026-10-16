@@ -199,6 +199,25 @@ pub struct LayerThermalParams {
     /// absorption mode preserving the pre-F3 single-layer normalisation.
     /// Typical 400 nm values: Ni 14 nm, Py 16 nm, CoFeB 17 nm, FGT ~18 nm.
     pub optical_skin_depth_m: f64,
+    /// LLB bath-coupling constant λ (dimensionless, Garanin/Atxitia).
+    /// `> 0` selects the **Atxitia longitudinal torque**:
+    ///     d|m|/dt = γ · α_∥(T) · (1/(2·χ̃_∥(T,B))) · (1 − |m|²/m_e²) · |m|
+    /// with α_∥(T) = 2·λ·T/(3·T_c) and χ̃_∥ read from `chi_par_table`.
+    /// `≤ 0` (legacy) keeps the phenomenological exponential relaxation
+    /// toward `m_target` governed by `tau_long_base` / `tau_fast_base`.
+    /// λ is distinct from the transverse Gilbert damping `alpha_0`; for
+    /// metals λ ≈ 0.02–0.3 whereas FMR α can be ≪ 0.01.
+    pub lambda_bath: f64,
+    /// Callen–Callen exponent κ for the uniaxial anisotropy, K(T) = K₀·m_e^κ.
+    /// Under LLB the anisotropy field acting on m = M/Ms(0) is scaled by
+    /// m_e^(κ−2). κ = 3 is the single-ion l=2 result; κ = 2 disables the
+    /// correction (pre-F4 behaviour).
+    pub k_u_exponent: f64,
+    /// Exchange-stiffness exponent a, A(T) = A₀·m_e^a. Under LLB the
+    /// exchange prefactor on m = M/Ms(0) is scaled by m_e^(a−2). a = 2 is
+    /// the mean-field result and leaves the field unchanged; Atxitia 2010
+    /// uses a ≈ 1.66–1.76 for FePt/Ni.
+    pub a_ex_exponent: f64,
     /// Short human-readable provenance string.
     pub notes: &'static str,
 }
@@ -211,6 +230,32 @@ impl LayerThermalParams {
     ///     R = 8 · a_sf · g_ep · k_B · T_c² · V_at / (μ_at_μB · (k_B·θ_D)²)
     /// with μ_at in units of μ_B (dimensionless). This is `R` in eq. (4) of
     /// Koopmans 2010; R · m · (T_p/T_c) · (1 − m·coth(m·T_c/T_e)) gives dm/dt.
+    /// True when the Garanin/Atxitia longitudinal torque is selected.
+    pub fn uses_atxitia(&self) -> bool {
+        self.lambda_bath > 0.0
+    }
+
+    /// LLB longitudinal damping α_∥(T) = 2·λ·T/(3·T_c) (Atxitia mode).
+    pub fn alpha_par_lambda(&self, t: f64) -> f64 {
+        if self.t_c < 1.0 {
+            return 0.0;
+        }
+        self.lambda_bath * 2.0 * t / (3.0 * self.t_c)
+    }
+
+    /// Transverse damping α_⊥(T): α₀·(1 − T/(3T_c)) below T_c and
+    /// α₀·(2T/(3T_c)) above (continuous at T_c, MFA result).
+    pub fn alpha_perp(&self, t: f64) -> f64 {
+        if self.t_c < 1.0 {
+            return self.alpha_0;
+        }
+        if t < self.t_c {
+            self.alpha_0 * (1.0 - t / (3.0 * self.t_c))
+        } else {
+            self.alpha_0 * (2.0 * t / (3.0 * self.t_c))
+        }
+    }
+
     pub fn r_koopmans_prefactor(&self) -> f64 {
         if self.mu_atom_bohr.abs() < 1e-20 || self.theta_d.abs() < 1e-20 {
             return 0.0;

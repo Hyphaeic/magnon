@@ -26,43 +26,66 @@ dm/dt = −γ / (1 + α²) · ( m × B_eff + α · m × (m × B_eff) )
 Implementation: `llg.wgsl::llg_torque`. Time integration: projected
 Heun (explicit trapezoidal + post-stage `normalize`).
 
-### 1.2 Landau–Lifshitz–Bloch (opt-in path, F2 phenomenological form)
+### 1.2 Landau–Lifshitz–Bloch (opt-in path)
 
-Transverse part — like LLG but with temperature-dependent damping:
+Two longitudinal forms are selectable per layer by `lambda_bath`.
 
-```
-dm/dt|_trans = −γ / (1 + α_⊥(T_s)²) · ( m × B_eff + α_⊥(T_s) · m × (m × B_eff) )
-```
-
-Longitudinal part — drives |m| toward the proxy variable `m_target`:
+**F4 Garanin/Atxitia form (`lambda_bath > 0`, default for `fgt-zhou`).**
+Landau–Lifshitz form, `m = M / Ms(0)` not unit-norm:
 
 ```
-d|m|/dt|_long = ( α_∥(T_s) / tau_long_base ) · ( m_target − |m| ) · m̂
+dm/dt = −γ · m × B_eff
+        −γ · α_⊥(T_s) · m̂ × (m̂ × B_eff)
+        +γ · α_∥(T_s) · H_∥ · |m| · m̂
+
+H_∥ = ( 1 − |m|² / m_e² ) / ( 2 · χ̃_∥ )                     m_e(T_s,B) > 0
+H_∥ = −( 1 + 3·T_c·|m|² / ( 5·(T_s − T_c) ) ) / χ̃_∥          m_e ≈ 0 (B = 0, T > T_c)
+
+α_∥(T) = 2·λ·T / (3·T_c)                     (λ: bath coupling, ≠ α_0)
+χ̃_∥    = ∂m_e/∂B  [1/T]  = χ_∥(T, B) · g·μ_B/k_B   (table §4.2, ×1.343 K/T)
 ```
 
-The proxy itself relaxes toward the field-dependent equilibrium:
+The applied field is not added to `H_∥` because `m_e(T, B)` and
+`χ̃_∥(T, B)` already contain it (2D tables, F1). The anisotropy and
+exchange fields enter only transversely (Garanin's anisotropy field is
+purely transverse). Linearised about `m_e` the relaxation time is
+`τ_∥ = χ̃_∥ / (γ·α_∥)`, which diverges at `T_c` (critical slowing down)
+and vanishes at low T. Because `χ̃_∥ → 0` exponentially at low T, the
+rate is clipped so that one explicit step never overshoots the
+equilibrium by more than half the remaining distance; the fixed point is
+unchanged.
+
+**Legacy phenomenological form (`lambda_bath ≤ 0`).** Transverse part
+like LLG with temperature-dependent damping and `1/(1+α_⊥²)`, plus
 
 ```
-dm_target/dt = ( α_∥(T_s) / tau_fast_base ) · ( m_e(T_s, B) − m_target )
-```
-
-Two-stage chain: `m_e → m_target → |m|`. When `tau_fast_base ≤ 0` the
-chain collapses (`m_target := m_e` instantly) and the longitudinal
-relaxation reduces to the F1 single-stage form. At T = 0 K both
-α_⊥(0) → α_0 and α_∥(0) → 0, so the longitudinal term vanishes and the
-LLB integrator reproduces LLG (gate residual ≤ 1.5·10⁻⁴).
-
-Damping temperature dependence (Atxitia 2011 standard MFA forms):
-
-```
-α_⊥(T) = α_0 · ( 1 − T / (3·T_c) )
+d|m|/dt|_long = ( α_∥(T_s) / tau_long_base ) · ( m_target − |m| )
+dm_target/dt  = ( α_∥(T_s) / tau_fast_base ) · ( m_e(T_s, B) − m_target )
 α_∥(T) = α_0 · ( 2·T / (3·T_c) )
 ```
 
-Implementation: `llg.wgsl::llb_torque` plus the proxy update inside
-`llg.wgsl::advance_m3tm` (implicit Euler, unconditionally stable).
-Phenomenological ≠ Atxitia: the χ_∥-coupled effective-field form is
-not yet implemented; see [`physics.md`](physics.md) §6.3.
+(`tau_fast_base ≤ 0` collapses the chain to `m_target := m_e`.) This path
+is kept for the regression gates; see [`physics.md`](physics.md) §6.3.
+
+**Damping temperature dependence (both forms, Atxitia 2011 MFA):**
+
+```
+α_⊥(T) = α_0 · ( 1 − T / (3·T_c) )       T < T_c
+α_⊥(T) = α_0 · ( 2·T / (3·T_c) )         T ≥ T_c   (continuous at T_c)
+```
+
+At T = 0 K both `α_∥(0) → 0` and `χ̃_∥ → 0`, so the longitudinal term
+vanishes and the LLB integrator reproduces LLG (gate residual ≤ 3·10⁻⁴).
+
+**Temperature scaling of K_u and A under LLB (F4).** With
+`K(T) = K_0 · m_e^κ` (Callen–Callen, κ = 3 for single-ion uniaxial) and
+`A(T) = A_0 · m_e^a` (a = 2 in MFA), the fields acting on
+`m = M / Ms(0)` are the §2 expressions multiplied by `m_e^(κ−2)` and
+`m_e^(a−2)` respectively, evaluated at the cell's `(T_e, |B_z|)`.
+Defaults κ = 3, a = 2.
+
+Implementation: `llg.wgsl::llb_torque`, `sample_chi_par`, `llb_scale`;
+host reference `llb_host.rs` (single cell).
 
 ### 1.3 Heun integrator (LLG)
 
@@ -274,11 +297,12 @@ Implementation: `material_thermal.rs::solve_m_e_spin_half_with_field`.
 χ_∥(0) = 0    (mean-field zero at saturation)
 ```
 
-Stored in the GPU as a 2D table `[i_T, i_B]` for consistency with the
-m_e table; the B-dependent form is approximated by evaluating the same
-expression at the field-shifted m_e. The shipped LLB longitudinal
-torque does **not** consume this table — see [`physics.md`](physics.md)
-§6.3 for the open Atxitia upgrade path.
+Stored in the GPU as a 2D table `[i_T, i_B]`. Evaluating the same
+expression at the field-shifted m_e is exact for `∂m_e/∂h` at finite
+field (the derivation holds at any h). Consumed by the F4 Atxitia
+longitudinal torque (§1.2) after conversion to `∂m_e/∂B` in 1/T.
+The T axis spans `[0, 1.5·T_c]`; hotter cells are clamped to the last
+row (see [`physics.md`](physics.md) §6.9).
 
 Implementation: `material_thermal.rs::brillouin_tables_spin_half_2d`.
 

@@ -1,6 +1,7 @@
 pub mod config;
 pub mod effective;
 pub mod gpu;
+pub mod llb_host;
 pub mod material;
 pub mod material_thermal;
 pub mod metrics;

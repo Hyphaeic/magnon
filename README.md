@@ -28,7 +28,8 @@ two-timescale longitudinal LLB with a proxy variable (F2), and
 Beer-Lambert per-layer optical absorption (F3).**
 
 > Calibrated against Zhou et al. *Natl. Sci. Rev.* 12, nwaf185 (2025) at the literal experimental operating point (T = T_c = 210 K, B = 1 T,
-F = 0.24 mJ/cm²) with loss 0.0002.*
+F = 0.24 mJ/cm²). F4 refit with the Atxitia torque: loss 0.023 at
+nominal fluence; see `docs/calibration.md` §1.4 for why.*
 
 ---
 
@@ -38,8 +39,8 @@ F = 0.24 mJ/cm²) with loss 0.0002.*
   Bit-stable against pre-thermal baseline.
 - **Thermal/LLB path:** opt-in via `--enable-thermal` / `--enable-llb`.
   Per-cell (T_e, T_p, |m|, m_target) state evolved by Koopmans M3TM
-  electron+phonon dynamics + a phenomenological two-stage longitudinal
-  relaxation toward the field-dependent equilibrium `m_e(T, B)`.
+  electron+phonon dynamics + a Garanin/Atxitia longitudinal torque
+  driven by the MFA χ_∥(T, B) table (F4), with Callen-Callen K(T).
 - **Optical drive:** up to 4 simultaneous laser pulses with Gaussian
   spatial + temporal profiles. Pulses can carry coherent IFE field, an
   M3TM thermal source (with absorbed fluence), or both. F3
@@ -59,10 +60,9 @@ simulator like OOMMF or MuMax3. It explicitly omits:
   thermally isolated. Multi-cell hot-spot studies trap heat indefinitely.
 - **Stochastic thermal LLB (Langevin noise)** — deterministic
   integration only.
-- **Full Atxitia LLB longitudinal torque** — the χ_∥-coupled effective-
-  field form. The shipped form is phenomenological exponential
-  relaxation toward a target. The χ_∥ table is computed and bound on
-  the GPU but currently unread.
+- **Longitudinal projections of exchange/anisotropy and Langevin
+  noise in the LLB** — the F4 Atxitia torque is deterministic and
+  uses only the free-energy longitudinal field.
 
 See [`docs/physics.md`](docs/physics.md) §6 for the full limitations
 list and [`docs/calibration.md`](docs/calibration.md) §4 for the trust-
@@ -108,8 +108,9 @@ All passing:
 | F1 m_e field-dependence monotone | PASS | lib unit test |
 | F2 collapsed = F1 single-stage | gap = 0.0000 | `examples/test_llb_two_stage.rs` |
 | F3 Beer-Lambert top/bot split | 360 K @ δ=14 nm | `examples/test_optical_skin_depth.rs` |
-| Zhou recalibration at literal T = T_c | demag 77.6%, rec@22ps 55.2%, loss 0.0002 | `examples/test_zhou_fgt_calibrate.rs` |
-| 12 lib unit tests | 12/12 | `cargo test --release --lib` |
+| F4 Atxitia LLB GPU vs host (Zhou point, 15 ps) | 3.6e-6 / 1.1e-6 | `examples/test_llb_atxitia_gpu_vs_host.rs` |
+| Zhou F4 refit at literal T = T_c (λ, R, g_sub) | demag 93.2%, rec@22ps 47.1%, loss 0.023 | `examples/test_zhou_fgt_calibrate.rs` |
+| 17 lib unit tests | 17/17 | `cargo test --release --lib` |
 
 `cargo build --release --bins --examples` is warning-free.
 
@@ -133,7 +134,7 @@ All passing:
 ┌──────────────────────────────────────────────────────────────────┐
 │   GPU buffers (binding group, 12 entries)                        │
 │                                                                  │
-│   0  params (uniform, 736 B) ────────────────────────────┐       │
+│   0  params (uniform, 800 B) ────────────────────────────┐       │
 │   1  mag      (cell × vec4 m, 16 B/cell)                 │       │
 │   2  mag_pred (Heun predictor scratch)                   │       │
 │   3  h_eff    (B_eff scratch)                            │       │
@@ -195,6 +196,7 @@ src/
 ├── effective.rs           (BulkMaterial × Substrate × Geometry) → effective params
 ├── photonic.rs            LaserPulse, PhotonicConfig, ThermalConfig
 ├── thermal.rs             Host-side M3TM reference integrator (test oracle)
+├── llb_host.rs            Host-side single-cell LLB+M3TM reference (F4 oracle)
 ├── metrics.rs             FFT / Q-factor / decay-time analysis for the sweep harness
 ├── gpu.rs                 GpuSolver (wgpu), buffer layout, dispatch
 ├── shaders/llg.wgsl       All compute kernels: LLG, LLB, M3TM, advance_m3tm

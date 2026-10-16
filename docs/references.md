@@ -96,7 +96,8 @@ Used in: [`equations.md`](equations.md) §3.
   forms `α_⊥(T) = α_0·(1 − T/(3·T_c))` and
   `α_∥(T) = α_0·(2T/(3·T_c))` used in `llg.wgsl::alpha_perp` and
   `alpha_par`. The χ_∥-coupled effective-field longitudinal torque
-  (eq. 22) is **not** implemented; see [`physics.md`](physics.md) §6.3.
+  (eq. 22) is implemented as the F4 path (`lambda_bath > 0`); see
+  [`physics.md`](physics.md) §5.4.
 
 - **Evans, R. F. L. et al.** "Stochastic form of the Landau-Lifshitz-
   Bloch equation." *Phys. Rev. B* 85, 014433 (2012). Stochastic LLB

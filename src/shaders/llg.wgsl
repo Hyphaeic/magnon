@@ -78,6 +78,9 @@ struct Params {
     layer_thermal_tau_fast: vec4<f32>,  // F2 fast-stage relaxation base time [s]
     layer_optical_atten: vec4<f32>,     // F3 per-layer attenuation factor [1/m]
     layer_gammas: vec4<f32>,            // per-layer gyromagnetic ratio [rad/(s·T)]
+    layer_thermal_lambda: vec4<f32>,    // F4 LLB bath coupling λ (>0 ⇒ Atxitia torque)
+    layer_thermal_k_exp: vec4<f32>,     // F4 Callen-Callen anisotropy exponent κ
+    layer_thermal_a_exp: vec4<f32>,     // F4 exchange-stiffness exponent a
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -527,10 +530,58 @@ fn sample_m_e(iz: u32, t: f32, b: f32) -> f32 {
     return v0 * (1.0 - ft) + v1 * ft;
 }
 
+// F4: bilinear (T, B) lookup of the MFA longitudinal susceptibility. The
+// table is stored per Kelvin (∂m_e/∂h with h = g·μ_B·B/k_B); multiply by
+// ZEEMAN_K_PER_T to get χ̃_∥ = ∂m_e/∂B in 1/T.
+const ZEEMAN_K_PER_T: f32 = 1.343;
+
+fn sample_chi_par(iz: u32, t: f32, b: f32) -> f32 {
+    let t_c = params.layer_thermal_t_c[iz];
+    if t_c < 1.0 { return 0.0; }
+    let t_max = 1.5 * t_c;
+    let n_t_f = f32(LLB_TABLE_N);
+    let n_b_f = f32(LLB_TABLE_N_B);
+    let ut = clamp(t / t_max, 0.0, 0.999999) * (n_t_f - 1.0);
+    let b_max = max(params.layer_thermal_b_max[iz], 1e-12);
+    let ub = clamp(abs(b) / b_max, 0.0, 0.999999) * (n_b_f - 1.0);
+    let it0 = u32(floor(ut));
+    let it1 = min(it0 + 1u, LLB_TABLE_N - 1u);
+    let ib0 = u32(floor(ub));
+    let ib1 = min(ib0 + 1u, LLB_TABLE_N_B - 1u);
+    let ft = ut - f32(it0);
+    let fb = ub - f32(ib0);
+    let layer_base = iz * LLB_TABLE_N * LLB_TABLE_N_B;
+    let v00 = chi_par_table[layer_base + it0 * LLB_TABLE_N_B + ib0];
+    let v01 = chi_par_table[layer_base + it0 * LLB_TABLE_N_B + ib1];
+    let v10 = chi_par_table[layer_base + it1 * LLB_TABLE_N_B + ib0];
+    let v11 = chi_par_table[layer_base + it1 * LLB_TABLE_N_B + ib1];
+    let v0 = v00 * (1.0 - fb) + v01 * fb;
+    let v1 = v10 * (1.0 - fb) + v11 * fb;
+    return (v0 * (1.0 - ft) + v1 * ft) * ZEEMAN_K_PER_T;
+}
+
+// F4: temperature scaling of the per-layer anisotropy and exchange
+// prefactors under LLB. With K(T) = K₀·m_e^κ and A(T) = A₀·m_e^a, the
+// fields acting on the non-unit vector m = M/Ms(0) pick up m_e^(κ−2) and
+// m_e^(a−2) respectively (the m_e² in the denominator comes from writing
+// the energy in terms of m/m_e). κ = 2 or a = 2 ⇒ factor 1.
+fn llb_scale(m_e: f32, exponent: f32) -> f32 {
+    let p = exponent - 2.0;
+    if abs(p) < 1e-6 { return 1.0; }
+    return pow(max(m_e, 1e-4), p);
+}
+
+// MFA transverse damping: α₀·(1 − T/3Tc) below Tc, α₀·(2T/3Tc) above.
+// Continuous at T = Tc (both give 2α₀/3); the old form went negative
+// above 1.5·Tc and was clamped to zero.
 fn alpha_perp(iz: u32, t_s: f32) -> f32 {
     let t_c = params.layer_thermal_t_c[iz];
     if t_c < 1.0 { return params.layer_alphas[iz]; }
-    return params.layer_thermal_alpha_0[iz] * (1.0 - t_s / (3.0 * t_c));
+    let a0 = params.layer_thermal_alpha_0[iz];
+    if t_s < t_c {
+        return a0 * (1.0 - t_s / (3.0 * t_c));
+    }
+    return a0 * (2.0 * t_s / (3.0 * t_c));
 }
 
 fn alpha_par(iz: u32, t_s: f32) -> f32 {
@@ -553,21 +604,70 @@ fn llb_torque(idx: u32, m: vec3<f32>, b_eff: vec3<f32>, iz: u32, t_s: f32) -> ve
     // ─ Transverse (LLG) part with temperature-dependent α_⊥ ─
     let a_perp = max(alpha_perp(iz, t_s), 0.0);
     let gamma = params.layer_gammas[iz];
-    let gp = gamma / (1.0 + a_perp * a_perp);
+    let lambda = params.layer_thermal_lambda[iz];
     let mxb = cross(m, b_eff);
-    let mxmxb = cross(m_hat, cross(m_hat, b_eff)) * m_mag;  // keep |m| prefactor
-    var dmdt = -gp * (mxb + a_perp * mxmxb);
+    var dmdt: vec3<f32>;
+    if lambda > 0.0 {
+        // F4 Garanin/Atxitia form (Landau-Lifshitz, no 1/(1+α²)):
+        //   dm/dt = −γ m×B − γ α_⊥ m̂×(m̂×B) + γ α_∥ (m·H_∥) m̂
+        // Transverse damping acts on the direction with no extra |m| factor
+        // (Garanin 1997 eq. 3; Evans 2012 eq. 1).
+        let mxmxb = cross(m_hat, cross(m_hat, b_eff));
+        dmdt = -gamma * (mxb + a_perp * mxmxb);
 
-    // ─ Longitudinal relaxation (phenomenological): drives |m| → m_e(T_s) ─
-    let a_par = alpha_par(iz, t_s);
-    let tau_base = params.layer_thermal_tau_long[iz];
-    if tau_base > 0.0 && a_par > 1e-9 {
-        let rate = a_par / tau_base;         // 1/s
-        // F2: drive |m| toward the proxy `m_target`, not directly toward
-        // m_e(T_s, B). The proxy lags m_e by τ_fast, producing the τ_1
-        // (fast) component of Zhou's two-stage decay; LLB on τ_slow gives τ_2.
-        let m_eq = m_target[idx];
-        dmdt = dmdt + rate * (m_eq - m_mag) * m_hat;
+        // ─ Longitudinal torque from the MFA free energy ─
+        //   H_∥ = (1/(2χ̃_∥))·(1 − m²/m_e²)            (ordered, m_e > 0)
+        //   H_∥ = −(1/χ̃_∥)·(1 + 3·T_c·m²/(5·(T−T_c))) (paramagnetic, m_e ≈ 0)
+        // The applied field is NOT added here: m_e(T, B) and χ̃_∥(T, B)
+        // already include it. The anisotropy/exchange longitudinal
+        // projections are dropped (Garanin's anisotropy field is purely
+        // transverse). α_∥ uses the bath coupling λ, not the FMR α₀.
+        let t_c = params.layer_thermal_t_c[iz];
+        let b_long = abs(params.b_ext.z);
+        let m_e = sample_m_e(iz, t_s, b_long);
+        let chi = max(sample_chi_par(iz, t_s, b_long), 1e-12);
+        let a_par = lambda * 2.0 * t_s / (3.0 * max(t_c, 1.0));
+        if a_par > 1e-12 {
+            var h_long: f32;
+            var m_eq: f32;
+            if m_e > 1e-3 {
+                h_long = (1.0 - m_mag * m_mag / (m_e * m_e)) / (2.0 * chi);
+                m_eq = m_e;
+            } else {
+                let dt_c = max(t_s - t_c, 1e-3 * t_c);
+                h_long = -(1.0 + 0.6 * t_c * m_mag * m_mag / dt_c) / chi;
+                m_eq = 0.0;
+            }
+            var long_rate = gamma * a_par * h_long;       // d|m|/dt = long_rate·|m|
+            // Stiffness guard: the linearised relaxation rate toward m_eq
+            // is Γ ≈ γ α_∥ (|m| + m_eq)|m| / (2 χ̃ m_eq²) and diverges as
+            // χ̃ → 0 at low T. Explicit Heun is stable only for Γ·dt ≲ 1,
+            // so scale the torque down when a single step would overshoot
+            // the equilibrium; the fixed point is unchanged.
+            let dist = m_mag - m_eq;
+            let step_mag = abs(long_rate * m_mag) * params.dt;
+            if step_mag > 0.5 * abs(dist) {
+                long_rate = long_rate * (0.5 * abs(dist) / step_mag);
+            }
+            dmdt = dmdt + long_rate * m_mag * m_hat;
+        }
+    } else {
+        // Legacy (pre-F4) phenomenological path — unchanged.
+        let gp = gamma / (1.0 + a_perp * a_perp);
+        let mxmxb = cross(m_hat, cross(m_hat, b_eff)) * m_mag;  // keep |m| prefactor
+        dmdt = -gp * (mxb + a_perp * mxmxb);
+
+        // ─ Longitudinal relaxation (phenomenological): drives |m| → m_e(T_s) ─
+        let a_par = alpha_par(iz, t_s);
+        let tau_base = params.layer_thermal_tau_long[iz];
+        if tau_base > 0.0 && a_par > 1e-9 {
+            let rate = a_par / tau_base;         // 1/s
+            // F2: drive |m| toward the proxy `m_target`, not directly toward
+            // m_e(T_s, B). The proxy lags m_e by τ_fast, producing the τ_1
+            // (fast) component of Zhou's two-stage decay; LLB on τ_slow gives τ_2.
+            let m_eq = m_target[idx];
+            dmdt = dmdt + rate * (m_eq - m_mag) * m_hat;
+        }
     }
 
     // SOT (only nonzero for layer 0) — preserved from LLG path.
@@ -589,10 +689,14 @@ fn field_torque_phase0_llb(@builtin(global_invocation_id) gid: vec3<u32>) {
     if idx >= params.cell_count { return; }
     let iz = layer_of(idx);
     let m = read_mag(idx);
-    let b_eff = exchange_from_mag(idx) + exchange_interlayer_from_mag(idx)
-              + anisotropy_field(m, iz) + zeeman_field() + laser_field_at(idx)
-              + exchange_bias_field(iz) + dmi_from_mag(idx);
     let t_s = temp_e[idx];
+    // F4: K(T) and A(T) follow m_e(T, B) via Callen-Callen / MFA exponents.
+    let m_e_loc = sample_m_e(iz, t_s, abs(params.b_ext.z));
+    let s_k = llb_scale(m_e_loc, params.layer_thermal_k_exp[iz]);
+    let s_a = llb_scale(m_e_loc, params.layer_thermal_a_exp[iz]);
+    let b_eff = s_a * (exchange_from_mag(idx) + exchange_interlayer_from_mag(idx))
+              + s_k * anisotropy_field(m, iz) + zeeman_field() + laser_field_at(idx)
+              + exchange_bias_field(iz) + dmi_from_mag(idx);
     let t = llb_torque(idx, m, b_eff, iz, t_s);
     let base = idx * 4u;
     h_eff[base] = b_eff.x; h_eff[base + 1u] = b_eff.y; h_eff[base + 2u] = b_eff.z;
@@ -605,10 +709,14 @@ fn field_torque_phase1_llb(@builtin(global_invocation_id) gid: vec3<u32>) {
     if idx >= params.cell_count { return; }
     let iz = layer_of(idx);
     let m = read_pred(idx);
-    let b_eff = exchange_from_pred(idx) + exchange_interlayer_from_pred(idx)
-              + anisotropy_field(m, iz) + zeeman_field() + laser_field_at(idx)
-              + exchange_bias_field(iz) + dmi_from_pred(idx);
     let t_s = temp_e[idx];
+    // F4: K(T) and A(T) follow m_e(T, B) via Callen-Callen / MFA exponents.
+    let m_e_loc = sample_m_e(iz, t_s, abs(params.b_ext.z));
+    let s_k = llb_scale(m_e_loc, params.layer_thermal_k_exp[iz]);
+    let s_a = llb_scale(m_e_loc, params.layer_thermal_a_exp[iz]);
+    let b_eff = s_a * (exchange_from_pred(idx) + exchange_interlayer_from_pred(idx))
+              + s_k * anisotropy_field(m, iz) + zeeman_field() + laser_field_at(idx)
+              + exchange_bias_field(iz) + dmi_from_pred(idx);
     let t = llb_torque(idx, m, b_eff, iz, t_s);
     let base = idx * 4u;
     h_eff[base] = b_eff.x; h_eff[base + 1u] = b_eff.y; h_eff[base + 2u] = b_eff.z;
